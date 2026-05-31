@@ -1,0 +1,21 @@
+# IDEs
+.vscode/
+.idea/
+.DS_Store
+
+# Node.js
+node_modules/
+app/node_modules/
+dist/
+app/dist/
+
+# Rust/Cargo
+target/
+app/src-tauri/target/
+
+# Tauri
+app/src-tauri/gen/schemas/
+
+# Environment
+.env
+*.local
