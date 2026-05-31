@@ -22,6 +22,10 @@ impl MetadataManager {
     pub async fn get_top_altcoins(&self) -> Result<Vec<String>> {
         info!("MetadataManager: Filtering high-quality symbols...");
         
+        let config_file = std::fs::read_to_string("config.json").unwrap_or_else(|_| "{\"altcoin_count\": 100}".to_string());
+        let config: serde_json::Value = serde_json::from_str(&config_file).unwrap_or_default();
+        let limit = config["altcoin_count"].as_u64().unwrap_or(100) as usize;
+        
         let tickers = self.rest_client.fetch_24h_tickers().await?;
         
         // 1. Lọc theo Volume 24h > 5,000,000 USDT
@@ -41,14 +45,14 @@ impl MetadataManager {
         // 2. Sắp xếp theo Volume giảm dần
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-        // 3. Lấy Top 100 (Loại trừ BTC và ETH để tính toán Altcoin Breadth sạch)
-        let top_100: Vec<String> = candidates.into_iter()
+        // 3. Lấy Top N (Loại trừ BTC và ETH để tính toán Altcoin Breadth sạch)
+        let top_n: Vec<String> = candidates.into_iter()
             .map(|(s, _)| s)
             .filter(|s| s != "BTCUSDT" && s != "ETHUSDT")
-            .take(100)
+            .take(limit)
             .collect();
 
-        info!("Successfully filtered top {} altcoins", top_100.len());
-        Ok(top_100)
+        info!("Successfully filtered top {} altcoins", top_n.len());
+        Ok(top_n)
     }
 }
