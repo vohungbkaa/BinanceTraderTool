@@ -109,6 +109,20 @@ pub struct NormalizedCandleData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AltcoinSnapshot {
+    pub symbol: String,
+    pub price: f64,
+    pub ema50_4h: f64,
+    pub ema200_4h: f64,
+    pub ema200_1d: f64,
+    pub change_1d_pct: f64,
+    pub change_4h_pct: f64,
+    pub vol_growth_4h_zscore: f64,
+    pub oi_growth_4h_pct: f64,
+    pub distance_to_ema50_4h_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SymbolConfig {
     pub symbol: String,
     pub status: String,

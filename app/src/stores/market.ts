@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import type { NormalizedCandleData, MarketIndices, MarketRegimeContext } from '../types/market';
 import { StructuralTrend, OperationalState, RiskStatus, ActionMode } from '../types/market';
+import type { ScanCandidate } from '../types/scanner';
 
 export const useMarketStore = defineStore('market', () => {
     const btcData = ref<Record<string, NormalizedCandleData>>({});
@@ -22,6 +23,8 @@ export const useMarketStore = defineStore('market', () => {
         allow_alt_scan: false,
         action_mode: ActionMode.OffSystem,
     });
+    const shortlist = ref<ScanCandidate[]>([]);
+    const lastScanTime = ref<number>(0);
     const logs = ref<string[]>([]);
 
     async function init() {
@@ -39,6 +42,16 @@ export const useMarketStore = defineStore('market', () => {
 
             if (eventType === 'RegimeUpdated') {
                 regime.value = event.payload.payload as MarketRegimeContext;
+                // [TỰ BẢO VỆ] Nếu Phase 1 báo đèn đỏ, xóa ngay danh sách quét cũ
+                if (!regime.value.allow_alt_scan) {
+                    shortlist.value = [];
+                }
+                return;
+            }
+            
+            if (eventType === 'ScannerUpdated') {
+                shortlist.value = event.payload.payload.shortlist;
+                lastScanTime.value = event.payload.payload.scan_timestamp;
                 return;
             }
 
@@ -58,5 +71,5 @@ export const useMarketStore = defineStore('market', () => {
         });
     }
 
-    return { btcData, timeframes, marketIndices, regime, logs, init };
+    return { btcData, timeframes, marketIndices, regime, shortlist, lastScanTime, logs, init };
 });

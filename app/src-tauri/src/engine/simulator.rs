@@ -2,21 +2,26 @@ use anyhow::Result;
 use crate::core::rest::BinanceRestClient;
 use crate::core::indicators::IndicatorEngine;
 use crate::engine::regime::{MarketRegimeEngine, ActionMode};
-use crate::core::models::{NormalizedCandleData, MarketIndices, Microstructure, MacroEvents, CandleMetadata};
+use crate::engine::scanner::ScannerEngine;
+use crate::core::models::{NormalizedCandleData, MarketIndices, Microstructure, MacroEvents, CandleMetadata, AltcoinSnapshot};
 use tracing::{info, warn};
 
 pub struct SystemSimulator {
     rest_client: BinanceRestClient,
     indicator_engine: IndicatorEngine,
     regime_engine: MarketRegimeEngine,
+    scanner_engine: ScannerEngine,
 }
 
 impl SystemSimulator {
     pub fn new() -> Self {
+        let rest_client = BinanceRestClient::new();
+        let indicator_engine = std::sync::Arc::new(tokio::sync::Mutex::new(IndicatorEngine::new()));
         Self {
-            rest_client: BinanceRestClient::new(),
+            rest_client: rest_client.clone(),
             indicator_engine: IndicatorEngine::new(),
             regime_engine: MarketRegimeEngine::new(),
+            scanner_engine: ScannerEngine::new(rest_client, indicator_engine),
         }
     }
 
@@ -26,152 +31,145 @@ impl SystemSimulator {
     /// - Bối cảnh dòng tiền (Flow) được giả lập là TỐT để cô lập và test logic Price Action.
     pub async fn run_historical_validation(&mut self, symbol: &str, limit_4h: u32) -> Result<()> {
         println!("\n========================================================");
-        println!("🚀 BẮT ĐẦU SIMULATION & BACKTEST: PHASE 0 -> PHASE 1");
+        println!("🚀 BẮT ĐẦU SIMULATION CHI TIẾT: PHASE 0 -> PHASE 1 -> PHASE 2");
         println!("========================================================");
-        println!("Symbol: {}", symbol);
-        println!("Số lượng nến 4H kiểm tra: {}", limit_4h);
+        
+        // 1. Danh sách Altcoins thực tế để test (Tránh fetch 100 con để né Rate Limit)
+        let test_alts = vec![
+            "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT", 
+            "XRPUSDT", "DOTUSDT", "MATICUSDT", "LINKUSDT", "AVAXUSDT"
+        ];
 
-        // 1. Fetch dữ liệu 1D (Cần nhiều nến hơn để tính EMA200 chính xác)
-        let limit_1d = (limit_4h / 6) + 200; // Đảm bảo đủ 200 nến 1D để Warm-up EMA200
-        info!("Fetching {} 1D candles for warm-up...", limit_1d);
-        let mut candles_1d = self.rest_client.fetch_klines(symbol, "1d", limit_1d).await?;
-        candles_1d.reverse(); // Đảo ngược để nến cũ nhất nằm đầu mảng (chronological)
+        // 2. Fetch dữ liệu BTC (Benchmark)
+        let limit_1d = (limit_4h / 6) + 200;
+        let mut btc_1d = self.rest_client.fetch_klines(symbol, "1d", limit_1d).await?;
+        btc_1d.reverse();
+        let mut btc_4h = self.rest_client.fetch_klines(symbol, "4h", limit_4h).await?;
+        btc_4h.reverse();
 
-        // 2. Fetch dữ liệu 4H
-        info!("Fetching {} 4H candles for evaluation...", limit_4h);
-        let mut candles_4h = self.rest_client.fetch_klines(symbol, "4h", limit_4h).await?;
-        candles_4h.reverse();
+        // 3. Tải và xử lý dữ liệu cho từng Altcoin
+        let mut alt_data_map = std::collections::HashMap::new();
+        for alt_sym in &test_alts {
+            info!("Fetching and processing real history for {}...", alt_sym);
+            let mut a_1d = self.rest_client.fetch_klines(alt_sym, "1d", limit_1d).await?;
+            a_1d.reverse();
+            let mut a_4h = self.rest_client.fetch_klines(alt_sym, "4h", limit_4h).await?;
+            a_4h.reverse();
 
-        // 3. Process Indicators cho toàn bộ mảng 1D để build lịch sử
-        let mut processed_1d = Vec::new();
-        for candle in candles_1d {
-            let inds = self.indicator_engine.process(&candle);
-            // Giả lập dữ liệu Flow & Risk mặc định TỐT
-            let data = NormalizedCandleData {
-                timestamp: candle.close_time,
-                candle: candle.clone(),
-                indicators: inds,
-                market_indices: MarketIndices {
-                    btc_d_trend: crate::core::models::TrendDirection::Down, // Giả lập tiền chảy vào Altcoin
-                    total3_btc_trend: crate::core::models::TrendDirection::Up,
-                    market_breadth_pct_above_ema50: 60.0,
-                    market_breadth_pct_above_ema200: 50.0,
-                },
-                microstructure: Microstructure {
-                    oi_change_4h_pct: 2.0, // Giả lập OI tăng
-                    price_change_4h_pct: 1.0,
-                    funding_rate_avg: 0.01,
-                    liquidation_surge_detected: false,
-                    spread_anomaly: false,
-                },
-                macro_events: MacroEvents {
-                    is_event_block_window: false,
-                    ..Default::default()
-                },
-                range_24h_pct: 0.0, // Chưa tính trong mock này
-                range_p40_90d: 5.0, // Giả lập P40 khá cao để không bị dính Sideway dễ dàng
-                atr_surge_ratio: 1.0, // Không có bão biến động
-                metadata: CandleMetadata::default(),
-            };
-            processed_1d.push(data);
+            // Tính toán Indicators lịch sử cho Altcoin (để có EMA50, EMA200 chuẩn)
+            let mut processed_1d = Vec::new();
+            let mut local_engine = IndicatorEngine::new();
+            for c in a_1d {
+                let inds = local_engine.process(&c);
+                processed_1d.push((c, inds));
+            }
+
+            let mut processed_4h = Vec::new();
+            let mut local_engine_4h = IndicatorEngine::new();
+            for c in a_4h {
+                let inds = local_engine_4h.process(&c);
+                processed_4h.push((c, inds));
+            }
+            alt_data_map.insert(alt_sym.to_string(), (processed_1d, processed_4h));
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        // 4. Chuẩn bị dữ liệu BTC đã xử lý
+        let mut btc_processed_1d = Vec::new();
+        let mut btc_engine_1d = IndicatorEngine::new();
+        for c in btc_1d {
+            let inds = btc_engine_1d.process(&c);
+            btc_processed_1d.push((c, inds));
         }
 
         let mut trigger_count = 0;
-        let mut macro_bullish_count = 0;
-        let mut macro_bearish_count = 0;
-        let mut active_bullish_count = 0;
-        let mut active_bearish_count = 0;
-        let mut score_above_40_count = 0;
+        let mut total_candidates_found = 0;
 
-        // 4. Duyệt qua từng nến 4H theo trình tự thời gian (như chạy Live)
-        for candle_4h in candles_4h {
-            let inds_4h = self.indicator_engine.process(&candle_4h);
+        // 5. Vòng lặp mô phỏng thời gian thực (4H steps)
+        for (i, candle_4h) in btc_4h.iter().enumerate() {
+            let inds_4h = self.indicator_engine.process(candle_4h);
             
-            // 5. Tìm nến 1D tương ứng (Nến 1D cuối cùng đã đóng tính đến thời điểm đóng của nến 4H này)
-            let matching_1d = processed_1d.iter()
-                .filter(|d| d.candle.close_time <= candle_4h.close_time)
+            // Tìm BTC 1D matching
+            let matching_btc_1d = btc_processed_1d.iter()
+                .filter(|(c, _)| c.close_time <= candle_4h.close_time)
                 .last();
 
-            if let Some(data_1d) = matching_1d {
-                // Tự động giả lập Flow đồng thuận với Trend 1D để test logic Price Action
-                let is_macro_bear = if let Some(ema200) = data_1d.indicators.ema200 { data_1d.candle.close < ema200 } else { false };
-                
-                let btc_d_mock = if is_macro_bear { crate::core::models::TrendDirection::Up } else { crate::core::models::TrendDirection::Down };
-                let total3_mock = if is_macro_bear { crate::core::models::TrendDirection::Down } else { crate::core::models::TrendDirection::Up };
-
-                let data_4h = NormalizedCandleData {
-                    timestamp: candle_4h.close_time,
+            if let Some((btc_c_1d, btc_i_1d)) = matching_btc_1d {
+                let data_btc_1d = NormalizedCandleData {
+                    candle: btc_c_1d.clone(),
+                    indicators: btc_i_1d.clone(),
+                    ..Default::default()
+                };
+                let data_btc_4h = NormalizedCandleData {
                     candle: candle_4h.clone(),
                     indicators: inds_4h,
                     market_indices: MarketIndices {
-                        btc_d_trend: btc_d_mock,
-                        total3_btc_trend: total3_mock,
-                        market_breadth_pct_above_ema50: if is_macro_bear { 30.0 } else { 60.0 },
-                        market_breadth_pct_above_ema200: if is_macro_bear { 20.0 } else { 50.0 },
-                    },
-                    microstructure: Microstructure {
-                        oi_change_4h_pct: 2.0,
-                        price_change_4h_pct: 1.0,
-                        funding_rate_avg: 0.01,
-                        liquidation_surge_detected: false,
-                        spread_anomaly: false,
-                    },
-                    macro_events: MacroEvents {
-                        is_event_block_window: false,
+                        // Giả lập flow theo trend BTC để test logic RS
+                        btc_d_trend: if candle_4h.close < btc_i_1d.ema200.unwrap_or(0.0) { crate::core::models::TrendDirection::Up } else { crate::core::models::TrendDirection::Down },
+                        total3_btc_trend: if candle_4h.close < btc_i_1d.ema200.unwrap_or(0.0) { crate::core::models::TrendDirection::Down } else { crate::core::models::TrendDirection::Up },
+                        market_breadth_pct_above_ema50: 50.0,
                         ..Default::default()
                     },
-                    range_24h_pct: (candle_4h.high - candle_4h.low) / candle_4h.open * 100.0,
                     range_p40_90d: 5.0,
-                    atr_surge_ratio: 1.0,
-                    metadata: CandleMetadata::default(),
+                    ..Default::default()
                 };
 
-                // Đưa vào Regime Engine để chấm điểm (Phase 1)
-                let context = self.regime_engine.evaluate_historical(data_1d, &data_4h).await;
+                // PHASE 1: Đánh giá bối cảnh
+                let context = self.regime_engine.evaluate_historical(&data_btc_1d, &data_btc_4h).await;
 
-                use crate::engine::regime::{StructuralTrend, OperationalState};
-                if context.structural_trend == StructuralTrend::MacroBullish { macro_bullish_count += 1; }
-                if context.structural_trend == StructuralTrend::MacroBearish { macro_bearish_count += 1; }
-                if context.operational_state == OperationalState::ActiveBullish { active_bullish_count += 1; }
-                if context.operational_state == OperationalState::ActiveBearish { active_bearish_count += 1; }
-                if context.market_score >= 40 { score_above_40_count += 1; }
-
-                // 6. GHI NHẬN KẾT QUẢ NẾU GATEWAY MỞ
                 if context.allow_alt_scan {
                     trigger_count += 1;
                     
-                    let date_str = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(candle_4h.close_time / 1000)
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_default();
+                    // PHASE 2: Quét Altcoin dựa trên dữ liệu THẬT đã tải
+                    let mut current_alt_snapshots = Vec::new();
+                    let btc_change_1d = (btc_c_1d.close - btc_c_1d.open) / btc_c_1d.open * 100.0;
+                    let btc_change_4h = (candle_4h.close - candle_4h.open) / candle_4h.open * 100.0;
 
-                    println!("--------------------------------------------------");
-                    println!("🟢 [GATEWAY OPEN] Tại thời điểm: {}", date_str);
-                    println!(" - Giá BTC: ${:.2}", candle_4h.close);
-                    println!(" - Điểm Market Score: {}/100", context.market_score);
-                    println!(" - Action Mode: {}", context.action_mode);
-                    println!(" - Macro Trend (1D): {}", context.structural_trend);
-                    println!(" - Micro State (4H): {}", context.operational_state);
-                    println!(" - ADX 4H: {:.2}", data_4h.indicators.adx14.unwrap_or(0.0));
+                    for alt_sym in &test_alts {
+                        if let Some((a_hist_1d, a_hist_4h)) = alt_data_map.get(*alt_sym) {
+                            let a_4h = a_hist_4h.get(i); // Lấy nến cùng index i với BTC 4H
+                            let a_1d = a_hist_1d.iter().filter(|(c, _)| c.close_time <= candle_4h.close_time).last();
+
+                            if let (Some((c4, i4)), Some((c1, _i1))) = (a_4h, a_1d) {
+                                current_alt_snapshots.push(AltcoinSnapshot {
+                                    symbol: alt_sym.to_string(),
+                                    price: c4.close,
+                                    ema50_4h: i4.ema50.unwrap_or(0.0),
+                                    ema200_4h: i4.ema200.unwrap_or(0.0),
+                                    ema200_1d: _i1.ema200.unwrap_or(0.0),
+                                    change_1d_pct: (c1.close - c1.open) / c1.open * 100.0,
+                                    change_4h_pct: (c4.close - c4.open) / c4.open * 100.0,
+                                    vol_growth_4h_zscore: 1.0, // Mocked for now
+                                    oi_growth_4h_pct: 5.0,     // Mocked for now
+                                    distance_to_ema50_4h_pct: (c4.close - i4.ema50.unwrap_or(0.0)) / i4.ema50.unwrap_or(1.0) * 100.0,
+                                });
+                            }
+                        }
+                    }
+
+                    let shortlist = self.scanner_engine.scan(&context, btc_change_1d, btc_change_4h, &current_alt_snapshots);
+                    
+                    if !shortlist.is_empty() {
+                        total_candidates_found += shortlist.len();
+                        let date_str = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(candle_4h.close_time / 1000)
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+                        
+                        println!("--------------------------------------------------");
+                        println!("🟢 [SIGNAL] {} | Mode: {} | Found: {} alts", date_str, context.action_mode, shortlist.len());
+                        for alt in shortlist {
+                            println!("   -> 🎯 {} | Rating: {} | RS: {:.2} | Rank: {:.1}", alt.symbol, alt.rs_rating, alt.rs_score, alt.rank_score);
+                        }
+                    }
                 }
             }
         }
 
-        println!("========================================================");
-        println!("🏁 TỔNG KẾT SIMULATION");
-        println!(" - Đã kiểm tra {} nến 4H lịch sử.", limit_4h);
-        println!(" - Macro Bullish: {} lần", macro_bullish_count);
-        println!(" - Macro Bearish: {} lần", macro_bearish_count);
-        println!(" - Active Bullish (4H): {} lần", active_bullish_count);
-        println!(" - Active Bearish (4H): {} lần", active_bearish_count);
-        println!(" - Lần đạt điểm > 40: {} lần", score_above_40_count);
-        println!(" - Số lần hệ thống cấp đèn xanh (allow_alt_scan = true): {}", trigger_count);
-        
-        if trigger_count == 0 {
-            println!(" ⚠️ Hệ thống KHÔNG tìm thấy cơ hội nào. Điều kiện quá khắt khe hoặc thị trường vừa qua quá xấu!");
-        } else {
-            let freq = limit_4h as f64 / trigger_count as f64;
-            println!(" - Tần suất: Trung bình mỗi {:.1} nến 4H (khoảng {:.1} ngày) có 1 tín hiệu bật đèn xanh.", freq, freq * 4.0 / 24.0);
-        }
+        println!("\n========================================================");
+        println!("🏁 TỔNG KẾT BACKTEST THỰC TẾ (10 Altcoins mẫu)");
+        println!(" - Tổng số nến 4H: {}", limit_4h);
+        println!(" - Số lần Phase 1 mở Gateway: {}", trigger_count);
+        println!(" - Tổng số Altcoin lọt vào Shortlist: {}", total_candidates_found);
+        println!(" - Hiệu suất lọc: Trung bình {:.1} coin mỗi khi Gateway mở.", total_candidates_found as f64 / trigger_count as f64);
         println!("========================================================");
 
         Ok(())

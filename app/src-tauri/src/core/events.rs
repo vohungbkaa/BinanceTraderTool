@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use super::models::NormalizedCandleData;
 use crate::engine::regime::MarketRegimeContext;
 
+use crate::engine::scanner::ScannerPayload;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "payload")]
 pub enum MarketEvent {
@@ -10,6 +12,9 @@ pub enum MarketEvent {
     
     // Sự kiện mới: Bối cảnh thị trường đã được cập nhật (Phase 1 phát ra)
     RegimeUpdated(MarketRegimeContext),
+
+    // Sự kiện mới: Danh sách quét Altcoin đã được cập nhật (Phase 2 phát ra)
+    ScannerUpdated(ScannerPayload),
 
     DepthUpdated {
         symbol: String,

@@ -16,7 +16,8 @@ use super::indicators::IndicatorEngine;
 use super::risk::RiskManager;
 use super::metadata::MetadataManager;
 use super::breadth::BreadthEngine;
-use crate::core::models::NormalizedCandleData;
+use crate::core::models::{NormalizedCandleData, AltcoinSnapshot};
+use crate::engine::scanner::{ScannerEngine, ScannerPayload};
 
 pub struct DataPipeline {
     market_event_rx: mpsc::Receiver<MarketEvent>,
@@ -25,12 +26,14 @@ pub struct DataPipeline {
     rest_client: BinanceRestClient,
     db: Arc<Database>,
     global_event_tx: broadcast::Sender<MarketEvent>,
-    indicator_engine: IndicatorEngine,
+    indicator_engine: Arc<Mutex<IndicatorEngine>>, 
     risk_manager: Arc<Mutex<RiskManager>>,
     metadata_manager: MetadataManager,
     breadth_engine: Arc<Mutex<BreadthEngine>>,
+    scanner_engine: ScannerEngine,
     symbols: Vec<String>,
     app_handle: AppHandle,
+    last_scan_timestamp: Arc<Mutex<i64>>, // Thêm bộ đếm thời gian để throttle
 }
 
 impl DataPipeline {
@@ -46,6 +49,8 @@ impl DataPipeline {
         let rest_client = BinanceRestClient::new();
         let mut ws_client = BinanceWsClient::new(market_tx, system_tx);
         ws_client.update_symbols(symbols.clone());
+        
+        let indicator_engine = Arc::new(Mutex::new(IndicatorEngine::new()));
 
         Self {
             market_event_rx: market_rx,
@@ -54,12 +59,14 @@ impl DataPipeline {
             rest_client: rest_client.clone(),
             db: db.clone(),
             global_event_tx,
-            indicator_engine: IndicatorEngine::new(),
+            indicator_engine: indicator_engine.clone(),
             risk_manager: Arc::new(Mutex::new(RiskManager::new())),
             metadata_manager: MetadataManager::new(rest_client.clone()),
-            breadth_engine: Arc::new(Mutex::new(BreadthEngine::new(rest_client, db.clone()))),
+            breadth_engine: Arc::new(Mutex::new(BreadthEngine::new(rest_client.clone(), db.clone()))),
+            scanner_engine: ScannerEngine::new(rest_client, indicator_engine),
             symbols,
             app_handle,
+            last_scan_timestamp: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -117,6 +124,8 @@ impl DataPipeline {
         });
 
         // 6. Main event loop
+        let mut regime_rx = self.global_event_tx.subscribe();
+        
         loop {
             tokio::select! {
                 Some(market_event) = self.market_event_rx.recv() => {
@@ -124,6 +133,44 @@ impl DataPipeline {
                 }
                 Some(system_event) = self.system_event_rx.recv() => {
                     self.handle_system_event(system_event).await;
+                }
+                Ok(global_event) = regime_rx.recv() => {
+                    if let MarketEvent::RegimeUpdated(context) = global_event {
+                        // [QUAN TRỌNG] Phải forward tin này lên UI để Dashboard cập nhật trạng thái BLOCKED/ENABLED
+                        let _ = self.app_handle.emit("market-event", &MarketEvent::RegimeUpdated(context.clone()));
+
+                        if context.allow_alt_scan {
+                            let now = chrono::Utc::now().timestamp();
+                            let mut last_scan = self.last_scan_timestamp.lock().await;
+                            
+                            // [THROTTLE] Chỉ cho phép quét tối đa 1 lần mỗi 15 phút (900 giây)
+                            if now - *last_scan >= 900 {
+                                info!("Phase 2: Gateway Open & Cooldown finished. Triggering real Altcoin Scan...");
+                                *last_scan = now;
+                                
+                                if let Ok(top_altcoins) = self.metadata_manager.get_top_altcoins().await {
+                                    let snapshots = self.scanner_engine.fetch_real_snapshots(&top_altcoins).await;
+                                    let shortlist = self.scanner_engine.scan(&context, 0.0, 0.0, &snapshots);
+                                    
+                                    let payload = ScannerPayload {
+                                        scan_timestamp: now,
+                                        shortlist,
+                                    };
+                                    
+                                    let _ = self.app_handle.emit("market-event", &MarketEvent::ScannerUpdated(payload.clone()));
+                                    let _ = self.global_event_tx.send(MarketEvent::ScannerUpdated(payload));
+                                }
+                            }
+                        } else {
+                            // [NGHIỆP VỤ QUAN TRỌNG] Khi Phase 1 chặn, gửi ngay danh sách rỗng để xóa UI
+                            let payload = ScannerPayload {
+                                scan_timestamp: chrono::Utc::now().timestamp(),
+                                shortlist: vec![],
+                            };
+                            let _ = self.app_handle.emit("market-event", &MarketEvent::ScannerUpdated(payload.clone()));
+                            let _ = self.global_event_tx.send(MarketEvent::ScannerUpdated(payload));
+                        }
+                    }
                 }
                 else => {
                     info!("Pipeline channels closed. Exiting...");
@@ -165,7 +212,8 @@ impl DataPipeline {
 
                 if is_fresh && has_enough {
                     for candle in candles {
-                        let inds = self.indicator_engine.process(&candle);
+                        let mut engine = self.indicator_engine.lock().await;
+                        let inds = engine.process(&candle);
                         // [FIX] Cập nhật lại indicators vào DB nếu chúng đang bị NULL
                         let data = NormalizedCandleData {
                             candle: candle.clone(),
@@ -180,7 +228,8 @@ impl DataPipeline {
                     match self.rest_client.fetch_klines(symbol, tf, 200).await {
                         Ok(data) => {
                             for c in &data {
-                                let inds = self.indicator_engine.process(c);
+                                let mut engine = self.indicator_engine.lock().await;
+                                let inds = engine.process(c);
                                 let mock_normalized = NormalizedCandleData {
                                     candle: c.clone(),
                                     indicators: inds,
@@ -209,7 +258,8 @@ impl DataPipeline {
                     error!("Gap filling error: {}", e);
                 }
 
-                data.indicators = self.indicator_engine.process(&data.candle);
+                let mut engine = self.indicator_engine.lock().await;
+                data.indicators = engine.process(&data.candle);
                 
                 if data.candle.timeframe == "1d" {
                     data.range_24h_pct = (data.candle.high - data.candle.low) / data.candle.open;
@@ -258,7 +308,8 @@ impl DataPipeline {
                 {
                     let risk = self.risk_manager.lock().await;
                     let breadth = self.breadth_engine.lock().await;
-                    data.indicators = self.indicator_engine.process_unclosed(&data.candle);
+                    let mut engine = self.indicator_engine.lock().await;
+                    data.indicators = engine.process_unclosed(&data.candle);
                     data.microstructure = risk.get_microstructure_risk(&data.candle.symbol);
                     
                     let mut indices = risk.get_market_indices();
@@ -320,9 +371,10 @@ impl DataPipeline {
             if let Ok(missing) = self.rest_client.fetch_klines(symbol, timeframe, missing_count + 1).await {
                 for c in missing {
                     if c.open_time > last_stored && c.open_time < current_open_time {
+                        let mut engine = self.indicator_engine.lock().await;
                         let d = NormalizedCandleData {
                             candle: c.clone(),
-                            indicators: self.indicator_engine.process(&c),
+                            indicators: engine.process(&c),
                             ..Default::default()
                         };
                         let _ = self.db.insert_closed_candle(&d).await;

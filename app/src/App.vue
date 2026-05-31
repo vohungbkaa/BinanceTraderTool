@@ -7,6 +7,7 @@ import MarketBreadth from './components/dashboard/MarketBreadth.vue';
 import MarketRegime from './components/dashboard/MarketRegime.vue';
 import RiskMonitor from './components/dashboard/RiskMonitor.vue';
 import LogStream from './components/dashboard/LogStream.vue';
+import AltcoinScanner from './components/dashboard/AltcoinScanner.vue';
 import GlossaryModal from './components/common/GlossaryModal.vue';
 
 const market = useMarketStore();
@@ -42,6 +43,12 @@ onMounted(() => {
         </div>
 
         <MarketBreadth :indices="market.marketIndices" />
+
+        <!-- Altcoin Scanner Results (Phase 2) -->
+        <AltcoinScanner 
+          :shortlist="market.shortlist" 
+          :last-scan-time="market.lastScanTime"
+        />
       </div>
 
       <!-- Right Column: Logs & Risk -->
