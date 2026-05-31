@@ -4,6 +4,7 @@ use core::events::MarketEvent;
 use engine::regime::MarketRegimeEngine;
 use tauri::Manager;
 use tracing::{info, error};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -17,7 +18,12 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt::init();
+    let file_appender = tracing_appender::rolling::daily("./logs", "binance_bot.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stdout.and(non_blocking))
+        .init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

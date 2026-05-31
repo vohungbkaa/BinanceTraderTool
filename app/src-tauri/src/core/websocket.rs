@@ -23,9 +23,16 @@ impl BinanceWsClient {
         event_tx: mpsc::Sender<MarketEvent>, 
         _system_tx: mpsc::Sender<crate::core::events::SystemEvent>
     ) -> Self {
+        let config_file = std::fs::read_to_string("config.json").unwrap_or_else(|_| "{\"timeframes\": [\"15m\", \"4h\", \"1d\"]}".to_string());
+        let config: serde_json::Value = serde_json::from_str(&config_file).unwrap_or_default();
+        let timeframes: Vec<String> = config["timeframes"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_else(|| vec!["15m".to_string(), "4h".to_string(), "1d".to_string()]);
+
         Self { 
             symbols: HashSet::new(),
-            timeframes: vec!["15m".to_string(), "4h".to_string(), "1d".to_string()],
+            timeframes,
             event_tx 
         }
     }
