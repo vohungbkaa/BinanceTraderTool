@@ -19,6 +19,7 @@ export interface Indicators {
     minus_di?: number;
     structure: string;
     close_above_ema200_count: number;
+    ema50_slope: number;
 }
 
 export interface MarketIndices {
@@ -51,4 +52,42 @@ export interface NormalizedCandleData {
     range_24h_pct: number;
     range_p40_90d: number;
     atr_surge_ratio: number;
+}
+
+export enum StructuralTrend {
+    MacroBullish = "MacroBullish",
+    MacroBearish = "MacroBearish",
+    MacroNeutral = "MacroNeutral",
+}
+
+export enum OperationalState {
+    ActiveBullish = "ActiveBullish",
+    ActiveBearish = "ActiveBearish",
+    Pullback = "Pullback",
+    DynamicSideway = "DynamicSideway",
+}
+
+export enum RiskStatus {
+    Normal = "Normal",
+    EventBlock = "EventBlock",
+    VolatilityAlert = "VolatilityAlert",
+    MicrostructureReset = "MicrostructureReset",
+}
+
+export enum ActionMode {
+    AggressiveLong = "AggressiveLong",
+    AggressiveShort = "AggressiveShort",
+    ScalpLong = "ScalpLong",
+    ScalpShort = "ScalpShort",
+    MeanReversion = "MeanReversion",
+    OffSystem = "OffSystem",
+}
+
+export interface MarketRegimeContext {
+    structural_trend: StructuralTrend;
+    operational_state: OperationalState;
+    risk_status: RiskStatus;
+    market_score: number;
+    allow_alt_scan: boolean;
+    action_mode: ActionMode;
 }

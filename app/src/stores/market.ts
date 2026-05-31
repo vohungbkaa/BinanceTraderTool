@@ -2,7 +2,8 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import type { NormalizedCandleData, MarketIndices } from '../types/market';
+import type { NormalizedCandleData, MarketIndices, MarketRegimeContext } from '../types/market';
+import { StructuralTrend, OperationalState, RiskStatus, ActionMode } from '../types/market';
 
 export const useMarketStore = defineStore('market', () => {
     const btcData = ref<Record<string, NormalizedCandleData>>({});
@@ -12,6 +13,14 @@ export const useMarketStore = defineStore('market', () => {
         total3_btc_trend: 'SIDEWAY',
         market_breadth_pct_above_ema50: 0,
         market_breadth_pct_above_ema200: 0,
+    });
+    const regime = ref<MarketRegimeContext>({
+        structural_trend: StructuralTrend.MacroNeutral,
+        operational_state: OperationalState.Pullback,
+        risk_status: RiskStatus.Normal,
+        market_score: 0,
+        allow_alt_scan: false,
+        action_mode: ActionMode.OffSystem,
     });
     const logs = ref<string[]>([]);
 
@@ -26,9 +35,14 @@ export const useMarketStore = defineStore('market', () => {
         }
 
         await listen<any>('market-event', (event) => {
-            console.log('Received market event:', event);
-            const data = event.payload.payload as NormalizedCandleData;
             const eventType = event.payload.event_type;
+
+            if (eventType === 'RegimeUpdated') {
+                regime.value = event.payload.payload as MarketRegimeContext;
+                return;
+            }
+
+            const data = event.payload.payload as NormalizedCandleData;
 
             if (data.candle.symbol.toUpperCase() === 'BTCUSDT') {
                 btcData.value[data.candle.timeframe] = data;
@@ -44,5 +58,5 @@ export const useMarketStore = defineStore('market', () => {
         });
     }
 
-    return { btcData, timeframes, marketIndices, logs, init };
+    return { btcData, timeframes, marketIndices, regime, logs, init };
 });

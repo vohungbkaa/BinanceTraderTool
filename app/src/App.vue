@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { onMounted, ref } from 'vue';
 import { useMarketStore } from './stores/market';
 import TheHeader from './components/layout/TheHeader.vue';
 import BTCCard from './components/dashboard/BTCCard.vue';
 import MarketBreadth from './components/dashboard/MarketBreadth.vue';
+import MarketRegime from './components/dashboard/MarketRegime.vue';
 import RiskMonitor from './components/dashboard/RiskMonitor.vue';
 import LogStream from './components/dashboard/LogStream.vue';
+import GlossaryModal from './components/common/GlossaryModal.vue';
 
 const market = useMarketStore();
+const isGlossaryOpen = ref(false);
 
 onMounted(() => {
   market.init();
@@ -22,6 +25,12 @@ onMounted(() => {
       <!-- Left Column: BTC Benchmark & Breadth -->
       <div class="col-span-12 lg:col-span-8 space-y-6">
         
+        <!-- Market Regime Center (NEW Phase 1) -->
+        <MarketRegime 
+          :regime="market.regime" 
+          @show-glossary="isGlossaryOpen = true"
+        />
+
         <!-- BTC Live Cards (Dynamic) -->
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           <BTCCard 
@@ -45,6 +54,12 @@ onMounted(() => {
         <LogStream :logs="market.logs" />
       </div>
     </div>
+
+    <!-- Modals -->
+    <GlossaryModal 
+      :show="isGlossaryOpen" 
+      @close="isGlossaryOpen = false" 
+    />
   </div>
 </template>
 
