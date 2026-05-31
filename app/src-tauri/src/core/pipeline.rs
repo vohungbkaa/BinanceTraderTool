@@ -101,7 +101,8 @@ impl DataPipeline {
                     
                     // [SPEC 2.3] Cập nhật xu hướng TOTAL3 (Ước tính dựa trên Breadth)
                     let mut risk = risk_manager_for_total3.lock().await;
-                    risk.total3_trend = if engine.market_breadth_ema50 > 50.0 { "UP".to_string() } else { "DOWN".to_string() };
+                    use crate::core::models::TrendDirection;
+                    risk.total3_trend = if engine.market_breadth_ema50 > 50.0 { TrendDirection::Up } else { TrendDirection::Down };
                 }
             }
         });

@@ -42,8 +42,8 @@ mod smoke_tests {
                 ..Default::default()
             },
             market_indices: MarketIndices {
-                btc_d_trend: "UP".to_string(),
-                total3_btc_trend: "UP".to_string(),
+                btc_d_trend: crate::core::models::TrendDirection::Up,
+                total3_btc_trend: crate::core::models::TrendDirection::Up,
                 market_breadth_pct_above_ema50: 75.0,
                 market_breadth_pct_above_ema200: 60.0,
             },

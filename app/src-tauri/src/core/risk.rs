@@ -1,4 +1,4 @@
-use crate::core::models::{MacroEvents, Microstructure, MarketIndices};
+use crate::core::models::{MacroEvents, Microstructure, MarketIndices, TrendDirection};
 use reqwest::Client;
 use serde::Deserialize;
 use tracing::{info};
@@ -27,7 +27,7 @@ pub struct RiskManager {
     pub symbol_funding: HashMap<String, f64>,
     
     // [SPEC 2.3] TOTAL3 / BTC Approximation trend
-    pub total3_trend: String,
+    pub total3_trend: TrendDirection,
 }
 
 impl RiskManager {
@@ -40,7 +40,7 @@ impl RiskManager {
             symbol_oi: HashMap::new(),
             symbol_oi_prev: HashMap::new(),
             symbol_funding: HashMap::new(),
-            total3_trend: "SIDEWAY".to_string(),
+            total3_trend: TrendDirection::Sideway,
         }
     }
 
@@ -109,7 +109,7 @@ impl RiskManager {
     /// [SPEC 2.3] Lấy chỉ số thị trường (BTC.D và TOTAL3)
     pub fn get_market_indices(&self) -> MarketIndices {
         MarketIndices {
-            btc_d_trend: if self.btc_dominance > 50.0 { "UP".to_string() } else { "DOWN".to_string() },
+            btc_d_trend: if self.btc_dominance > 50.0 { TrendDirection::Up } else { TrendDirection::Down },
             total3_btc_trend: self.total3_trend.clone(),
             market_breadth_pct_above_ema50: 0.0,
             market_breadth_pct_above_ema200: 0.0,

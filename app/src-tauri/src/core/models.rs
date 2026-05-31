@@ -56,10 +56,34 @@ pub struct MacroEvents {
     pub is_event_block_window: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TrendDirection {
+    Up,
+    Down,
+    Sideway,
+}
+
+impl Default for TrendDirection {
+    fn default() -> Self {
+        Self::Sideway
+    }
+}
+
+impl std::fmt::Display for TrendDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Up => "UP",
+            Self::Down => "DOWN",
+            Self::Sideway => "SIDEWAY",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct MarketIndices {
-    pub btc_d_trend: String,
-    pub total3_btc_trend: String,
+    pub btc_d_trend: TrendDirection,
+    pub total3_btc_trend: TrendDirection,
     pub market_breadth_pct_above_ema50: f64,
     pub market_breadth_pct_above_ema200: f64,
 }

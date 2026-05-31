@@ -4,22 +4,45 @@ use crate::core::models::{Candle, Indicators};
 use std::collections::HashMap;
 
 #[derive(Clone)]
+struct WilderSmoothing {
+    period: f64,
+    val: f64,
+    initialized: bool,
+}
+
+impl WilderSmoothing {
+    fn new(period: u32) -> Self {
+        Self { period: period as f64, val: 0.0, initialized: false }
+    }
+    fn next(&mut self, input: f64) -> f64 {
+        if !self.initialized {
+            self.val = input;
+            self.initialized = true;
+        } else {
+            self.val = (input + (self.period - 1.0) * self.val) / self.period;
+        }
+        self.val
+    }
+}
+
+#[derive(Clone)]
 pub struct SymbolIndicatorState {
     ema20: ExponentialMovingAverage,
     ema50: ExponentialMovingAverage,
     ema200: ExponentialMovingAverage,
     atr14: AverageTrueRange,
     atr20_avg: ExponentialMovingAverage,
-    smoothed_tr: ExponentialMovingAverage,
-    smoothed_plus_dm: ExponentialMovingAverage,
-    smoothed_minus_dm: ExponentialMovingAverage,
-    smoothed_dx: ExponentialMovingAverage,
+    smoothed_tr: WilderSmoothing,
+    smoothed_plus_dm: WilderSmoothing,
+    smoothed_minus_dm: WilderSmoothing,
+    smoothed_dx: WilderSmoothing,
     prev_candle: Option<Candle>,
     candle_buffer: Vec<Candle>,
     last_pivot_high: f64,
     last_pivot_low: f64,
     close_above_ema200_count: u32,
     prev_ema50: Option<f64>,
+    last_structure: String,
 }
 
 impl SymbolIndicatorState {
@@ -30,16 +53,17 @@ impl SymbolIndicatorState {
             ema200: ExponentialMovingAverage::new(200).unwrap(),
             atr14: AverageTrueRange::new(14).unwrap(),
             atr20_avg: ExponentialMovingAverage::new(20).unwrap(),
-            smoothed_tr: ExponentialMovingAverage::new(14).unwrap(),
-            smoothed_plus_dm: ExponentialMovingAverage::new(14).unwrap(),
-            smoothed_minus_dm: ExponentialMovingAverage::new(14).unwrap(),
-            smoothed_dx: ExponentialMovingAverage::new(14).unwrap(),
+            smoothed_tr: WilderSmoothing::new(14),
+            smoothed_plus_dm: WilderSmoothing::new(14),
+            smoothed_minus_dm: WilderSmoothing::new(14),
+            smoothed_dx: WilderSmoothing::new(14),
             prev_candle: None,
             candle_buffer: Vec::with_capacity(7),
             last_pivot_high: 0.0,
             last_pivot_low: f64::MAX,
             close_above_ema200_count: 0,
             prev_ema50: None,
+            last_structure: "None".to_string(),
         }
     }
 
@@ -117,11 +141,15 @@ impl SymbolIndicatorState {
         self.prev_candle = Some(candle.clone());
         if self.candle_buffer.len() >= 7 { self.candle_buffer.remove(0); }
         self.candle_buffer.push(candle.clone());
-        let structure = self.detect_pivot_fractal();
+        let new_structure = self.detect_pivot_fractal();
+        
+        if new_structure != "None" {
+            self.last_structure = new_structure;
+        }
 
         Indicators {
             ema20: Some(ema20), ema50: Some(ema50), ema200: Some(ema200),
-            atr14: Some(atr), adx14: adx, plus_di, minus_di, structure,
+            atr14: Some(atr), adx14: adx, plus_di, minus_di, structure: self.last_structure.clone(),
             close_above_ema200_count: self.close_above_ema200_count,
             ema50_slope,
         }

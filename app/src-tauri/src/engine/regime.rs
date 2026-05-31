@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::core::models::NormalizedCandleData;
+use crate::core::models::{NormalizedCandleData, TrendDirection};
 use crate::core::events::MarketEvent;
 use tokio::sync::broadcast;
 use tracing::{info, error};
@@ -157,6 +157,18 @@ impl MarketRegimeEngine {
         }
     }
 
+    /// Dành riêng cho Backtest/Simulator: Nhồi trực tiếp dữ liệu 1D và 4H để lấy kết quả
+    pub async fn evaluate_historical(
+        &mut self, 
+        data_1d: &NormalizedCandleData, 
+        data_4h: &NormalizedCandleData
+    ) -> MarketRegimeContext {
+        self.latest_1d = Some(data_1d.clone());
+        self.latest_4h = Some(data_4h.clone());
+        // Giả lập nến trigger là nến 4H
+        self.analyze(data_4h).await
+    }
+
     async fn analyze(&self, current_data: &NormalizedCandleData) -> MarketRegimeContext {
         info!("Phase 1: Analyzing Market Regime for {}...", current_data.candle.symbol);
 
@@ -249,10 +261,18 @@ impl MarketRegimeEngine {
             }
 
             // Flow Score (30)
-            if risk_data.market_indices.btc_d_trend == "DOWN" && risk_data.market_indices.market_breadth_pct_above_ema50 > 50.0 {
-                flow_score = 30;
-            } else if risk_data.market_indices.total3_btc_trend == "UP" {
-                flow_score = 20;
+            if structural_trend == StructuralTrend::MacroBullish {
+                if risk_data.market_indices.btc_d_trend == TrendDirection::Down && risk_data.market_indices.market_breadth_pct_above_ema50 > 50.0 {
+                    flow_score = 30;
+                } else if risk_data.market_indices.total3_btc_trend == TrendDirection::Up {
+                    flow_score = 20;
+                }
+            } else if structural_trend == StructuralTrend::MacroBearish {
+                if risk_data.market_indices.btc_d_trend == TrendDirection::Up && risk_data.market_indices.market_breadth_pct_above_ema50 < 40.0 {
+                    flow_score = 30; // Tiền rút khỏi Altcoin
+                } else if risk_data.market_indices.total3_btc_trend == TrendDirection::Down {
+                    flow_score = 20;
+                }
             }
 
             market_score = trend_score + risk_score + pos_score + flow_score;
@@ -263,10 +283,10 @@ impl MarketRegimeEngine {
         // ---------------------------------------------------------
         let flow_alignment = match structural_trend {
             StructuralTrend::MacroBullish => {
-                risk_data.market_indices.btc_d_trend == "DOWN" || risk_data.market_indices.total3_btc_trend == "UP"
+                risk_data.market_indices.btc_d_trend == TrendDirection::Down || risk_data.market_indices.total3_btc_trend == TrendDirection::Up
             },
             StructuralTrend::MacroBearish => {
-                risk_data.market_indices.btc_d_trend == "UP" || risk_data.market_indices.total3_btc_trend == "DOWN"
+                risk_data.market_indices.btc_d_trend == TrendDirection::Up || risk_data.market_indices.total3_btc_trend == TrendDirection::Down
             },
             StructuralTrend::MacroNeutral => false,
         };
@@ -287,7 +307,7 @@ impl MarketRegimeEngine {
             action_mode = ActionMode::AggressiveShort;
         } else if operational_state == OperationalState::DynamicSideway && risk_status == RiskStatus::Normal {
             action_mode = ActionMode::MeanReversion;
-        } else if operational_state == OperationalState::Pullback || (market_score >= 40 && market_score <= 75) {
+        } else if allow_alt_scan {
             if structural_trend == StructuralTrend::MacroBullish {
                 action_mode = ActionMode::ScalpLong;
             } else {
@@ -336,8 +356,8 @@ mod tests {
                 ..Default::default()
             },
             market_indices: MarketIndices {
-                btc_d_trend: "DOWN".to_string(),
-                total3_btc_trend: "UP".to_string(),
+                btc_d_trend: crate::core::models::TrendDirection::Down,
+                total3_btc_trend: crate::core::models::TrendDirection::Up,
                 market_breadth_pct_above_ema50: 60.0,
                 market_breadth_pct_above_ema200: 50.0,
             },
@@ -400,8 +420,8 @@ mod tests {
         // Để test ra MeanReversion, điểm phải >= 40.
         // Trend = 0 (do sideway), Risk = 15, Pos = 18, Flow cần thêm điểm.
         // Set TOTAL3 = UP để lấy 20 điểm Flow -> Tổng = 53 điểm.
-        data.market_indices.btc_d_trend = "UP".to_string();
-        data.market_indices.total3_btc_trend = "UP".to_string();
+        data.market_indices.btc_d_trend = crate::core::models::TrendDirection::Up;
+        data.market_indices.total3_btc_trend = crate::core::models::TrendDirection::Up;
 
         let context2 = engine.analyze(&data).await;
         assert_eq!(context2.allow_alt_scan, false);
@@ -421,8 +441,8 @@ mod tests {
         data.indicators.minus_di = Some(25.0);
         
         // Flow thuận Bearish (Dòng tiền rút)
-        data.market_indices.btc_d_trend = "UP".to_string();
-        data.market_indices.total3_btc_trend = "DOWN".to_string();
+        data.market_indices.btc_d_trend = crate::core::models::TrendDirection::Up;
+        data.market_indices.total3_btc_trend = crate::core::models::TrendDirection::Down;
 
         let context = engine.analyze(&data).await;
 
