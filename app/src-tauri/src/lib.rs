@@ -55,7 +55,7 @@ pub fn run() {
 
                 // 3. Khởi chạy Phase 1: Market Regime Engine (Background Task)
                 // Nó sẽ lắng nghe nến từ bus và phát lại kết quả bối cảnh lên bus
-                let regime_engine = MarketRegimeEngine::new();
+                let mut regime_engine = MarketRegimeEngine::new();
                 let regime_rx = global_tx.subscribe();
                 let regime_tx = global_tx.clone();
                 tokio::spawn(async move {

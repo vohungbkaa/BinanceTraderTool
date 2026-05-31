@@ -25,6 +25,7 @@ pub struct Indicators {
     pub minus_di: Option<f64>,
     pub structure: String,
     pub close_above_ema200_count: u32,
+    pub ema50_slope: f64,
 }
 
 impl Default for Indicators {
@@ -34,6 +35,7 @@ impl Default for Indicators {
             atr14: None, adx14: None, plus_di: None, minus_di: None,
             structure: "None".to_string(),
             close_above_ema200_count: 0,
+            ema50_slope: 0.0,
         }
     }
 }

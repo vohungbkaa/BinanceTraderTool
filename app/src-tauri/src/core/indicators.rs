@@ -19,6 +19,7 @@ pub struct SymbolIndicatorState {
     last_pivot_high: f64,
     last_pivot_low: f64,
     close_above_ema200_count: u32,
+    prev_ema50: Option<f64>,
 }
 
 impl SymbolIndicatorState {
@@ -38,6 +39,7 @@ impl SymbolIndicatorState {
             last_pivot_high: 0.0,
             last_pivot_low: f64::MAX,
             close_above_ema200_count: 0,
+            prev_ema50: None,
         }
     }
 
@@ -88,6 +90,12 @@ impl SymbolIndicatorState {
         let ema50 = self.ema50.next(candle.close);
         let ema200 = self.ema200.next(candle.close);
 
+        let mut ema50_slope = 0.0;
+        if let Some(prev) = self.prev_ema50 {
+            ema50_slope = (ema50 - prev) / prev * 100.0; // Slope in percentage
+        }
+        self.prev_ema50 = Some(ema50);
+
         if candle.close > ema200 {
             self.close_above_ema200_count += 1;
         } else {
@@ -115,6 +123,7 @@ impl SymbolIndicatorState {
             ema20: Some(ema20), ema50: Some(ema50), ema200: Some(ema200),
             atr14: Some(atr), adx14: adx, plus_di, minus_di, structure,
             close_above_ema200_count: self.close_above_ema200_count,
+            ema50_slope,
         }
     }
 }

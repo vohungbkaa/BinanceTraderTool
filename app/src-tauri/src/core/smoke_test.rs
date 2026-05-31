@@ -39,6 +39,7 @@ mod smoke_tests {
                 ema20: Some(102.5), ema50: Some(101.0), ema200: Some(100.0),
                 atr14: Some(2.5), adx14: None, plus_di: None, minus_di: None,
                 structure: "HH".to_string(),
+                ..Default::default()
             },
             market_indices: MarketIndices {
                 btc_d_trend: "UP".to_string(),
