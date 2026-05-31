@@ -242,6 +242,13 @@ impl DataPipeline {
                     error!("Failed to save closed candle to DB: {}", e);
                 }
 
+                info!("[CONFIRMED] {} - {}: C: {} OI Change: {:.2}%", 
+                    data.candle.symbol, data.candle.timeframe, data.candle.close, data.microstructure.oi_change_4h_pct);
+                
+                if let Err(e) = self.db.insert_closed_candle(&data).await {
+                    error!("Failed to save closed candle to DB: {}", e);
+                }
+
                 let _ = self.app_handle.emit("market-event", &MarketEvent::CandleClosed(data.clone()));
                 let _ = self.global_event_tx.send(MarketEvent::CandleClosed(data));
             }

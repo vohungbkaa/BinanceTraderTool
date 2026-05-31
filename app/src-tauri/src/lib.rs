@@ -16,6 +16,12 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+#[tauri::command]
+fn get_config() -> serde_json::Value {
+    let config_file = std::fs::read_to_string("config.json").unwrap_or_else(|_| "{\"timeframes\": [\"15m\", \"4h\", \"1d\"], \"altcoin_count\": 100}".to_string());
+    serde_json::from_str(&config_file).unwrap_or_default()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let file_appender = tracing_appender::rolling::daily("./logs", "binance_bot.log");
@@ -27,7 +33,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![greet, get_config])
         .setup(|app| {
             info!("Tauri application setup...");
             let app_handle = app.handle().clone();
