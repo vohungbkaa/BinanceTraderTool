@@ -28,8 +28,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![greet])
-        .setup(|_app| {
+        .setup(|app| {
             info!("Tauri application setup...");
+            let app_handle = app.handle().clone();
 
             tauri::async_runtime::spawn(async move {
                 // 1. Tạo Global Event Bus (Broadcast)
@@ -59,7 +60,7 @@ pub fn run() {
                 // [SPEC 2.1] Chỉ theo dõi BTCUSDT để xác định Market Regime (Bối cảnh chung)
                 // Các Altcoin khác sẽ được quét ở Phase 2 (Scanner)
                 let initial_symbols = vec!["BTCUSDT".to_string()];
-                let mut pipeline = DataPipeline::new(initial_symbols, db, global_tx);
+                let mut pipeline = DataPipeline::new(initial_symbols, db, global_tx, app_handle);
                 
                 if let Err(e) = pipeline.start().await {
                     error!("Data Pipeline stopped: {}", e);

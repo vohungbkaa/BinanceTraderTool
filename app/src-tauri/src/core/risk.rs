@@ -79,12 +79,16 @@ impl RiskManager {
         }
     }
 
-    /// [SPEC 2.3] Cập nhật OI và lưu vết để tính thay đổi %
+    /// [SPEC 2.3] Cập nhật OI hiện tại
     pub fn update_oi(&mut self, symbol: String, current_oi: f64) {
-        if let Some(old_oi) = self.symbol_oi.get(&symbol) {
-            self.symbol_oi_prev.insert(symbol.clone(), *old_oi);
-        }
         self.symbol_oi.insert(symbol, current_oi);
+    }
+
+    /// [SPEC 2.3] Snapshot OI 4H trước đó khi nến 4H đóng
+    pub fn snapshot_4h_oi(&mut self, symbol: &str) {
+        if let Some(&current_oi) = self.symbol_oi.get(symbol) {
+            self.symbol_oi_prev.insert(symbol.to_string(), current_oi);
+        }
     }
 
     /// [SPEC 2.2 & 2.3] Trả về dữ liệu vị thế

@@ -3,6 +3,7 @@ use tokio::sync::{mpsc, broadcast};
 use tracing::{info, error, warn};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tauri::{AppHandle, Emitter};
 
 #[cfg(test)]
 mod pipeline_test;
@@ -29,13 +30,15 @@ pub struct DataPipeline {
     metadata_manager: MetadataManager,
     breadth_engine: Arc<Mutex<BreadthEngine>>,
     symbols: Vec<String>,
+    app_handle: AppHandle,
 }
 
 impl DataPipeline {
     pub fn new(
         symbols: Vec<String>, 
         db: Arc<Database>, 
-        global_event_tx: broadcast::Sender<MarketEvent>
+        global_event_tx: broadcast::Sender<MarketEvent>,
+        app_handle: AppHandle,
     ) -> Self {
         let (market_tx, market_rx) = mpsc::channel(1000);
         let (system_tx, system_rx) = mpsc::channel(100);
@@ -56,6 +59,7 @@ impl DataPipeline {
             metadata_manager: MetadataManager::new(rest_client.clone()),
             breadth_engine: Arc::new(Mutex::new(BreadthEngine::new(rest_client, db.clone()))),
             symbols,
+            app_handle,
         }
     }
 
@@ -212,11 +216,15 @@ impl DataPipeline {
                 }
 
                 {
-                    let risk = self.risk_manager.lock().await;
+                    let mut risk = self.risk_manager.lock().await;
                     let breadth = self.breadth_engine.lock().await;
                     
                     data.microstructure = risk.get_microstructure_risk(&data.candle.symbol);
                     data.macro_events = risk.get_macro_events().await;
+                    
+                    if data.candle.timeframe == "4h" {
+                        risk.snapshot_4h_oi(&data.candle.symbol);
+                    }
                     
                     let mut indices = risk.get_market_indices();
                     indices.market_breadth_pct_above_ema50 = breadth.market_breadth_ema50;
@@ -234,6 +242,7 @@ impl DataPipeline {
                     error!("Failed to save closed candle to DB: {}", e);
                 }
 
+                let _ = self.app_handle.emit("market-event", &MarketEvent::CandleClosed(data.clone()));
                 let _ = self.global_event_tx.send(MarketEvent::CandleClosed(data));
             }
 
@@ -241,7 +250,7 @@ impl DataPipeline {
                 {
                     let risk = self.risk_manager.lock().await;
                     let breadth = self.breadth_engine.lock().await;
-                    data.indicators = self.indicator_engine.process(&data.candle);
+                    data.indicators = self.indicator_engine.process_unclosed(&data.candle);
                     data.microstructure = risk.get_microstructure_risk(&data.candle.symbol);
                     
                     let mut indices = risk.get_market_indices();
@@ -251,6 +260,7 @@ impl DataPipeline {
                 }
                 
                 info!("[LIVE TICK] {} - {}: C: {}", data.candle.symbol, data.candle.timeframe, data.candle.close);
+                let _ = self.app_handle.emit("market-event", &MarketEvent::CandleUpdated(data.clone()));
                 let _ = self.global_event_tx.send(MarketEvent::CandleUpdated(data));
             }
             MarketEvent::DepthUpdated { symbol, spread_bps, liquidity_score, timestamp: _ } => {

@@ -10,8 +10,13 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@lucide/vue": "^1.17.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "clsx": "^2.1.1",
+    "lucide-vue-next": "^1.0.0",
+    "pinia": "^3.0.4",
+    "tailwind-merge": "^3.6.0",
     "vue": "^3.5.13"
   },
   "devDependencies": {

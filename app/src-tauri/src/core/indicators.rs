@@ -3,6 +3,7 @@ use ta::{Next, DataItem};
 use crate::core::models::{Candle, Indicators};
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub struct SymbolIndicatorState {
     ema20: ExponentialMovingAverage,
     ema50: ExponentialMovingAverage,
@@ -17,6 +18,7 @@ pub struct SymbolIndicatorState {
     candle_buffer: Vec<Candle>,
     last_pivot_high: f64,
     last_pivot_low: f64,
+    close_above_ema200_count: u32,
 }
 
 impl SymbolIndicatorState {
@@ -35,6 +37,7 @@ impl SymbolIndicatorState {
             candle_buffer: Vec::with_capacity(7),
             last_pivot_high: 0.0,
             last_pivot_low: f64::MAX,
+            close_above_ema200_count: 0,
         }
     }
 
@@ -85,6 +88,12 @@ impl SymbolIndicatorState {
         let ema50 = self.ema50.next(candle.close);
         let ema200 = self.ema200.next(candle.close);
 
+        if candle.close > ema200 {
+            self.close_above_ema200_count += 1;
+        } else {
+            self.close_above_ema200_count = 0;
+        }
+
         // [FIX] Kiểm tra nến hợp lệ trước khi builder DataItem để tránh panic
         let mut atr = 0.0;
         if candle.high >= candle.low && candle.high > 0.0 {
@@ -105,6 +114,7 @@ impl SymbolIndicatorState {
         Indicators {
             ema20: Some(ema20), ema50: Some(ema50), ema200: Some(ema200),
             atr14: Some(atr), adx14: adx, plus_di, minus_di, structure,
+            close_above_ema200_count: self.close_above_ema200_count,
         }
     }
 }
@@ -122,5 +132,15 @@ impl IndicatorEngine {
         let key = format!("{}:{}", candle.symbol, candle.timeframe);
         let state = self.states.entry(key).or_insert_with(SymbolIndicatorState::new);
         state.next(candle)
+    }
+
+    pub fn process_unclosed(&mut self, candle: &Candle) -> Indicators {
+        let key = format!("{}:{}", candle.symbol, candle.timeframe);
+        // Lấy state hiện tại (nếu có) hoặc tạo mới
+        let state = self.states.entry(key).or_insert_with(SymbolIndicatorState::new);
+        
+        // Tạo bản sao (Clone) để tính toán tạm thời, KHÔNG ảnh hưởng state gốc
+        let mut temp_state = state.clone();
+        temp_state.next(candle)
     }
 }
