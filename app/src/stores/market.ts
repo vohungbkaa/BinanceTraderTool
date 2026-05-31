@@ -36,7 +36,8 @@ export const useMarketStore = defineStore('market', () => {
             }
 
             if (eventType === 'CandleClosed') {
-                const logMsg = `[CONFIRMED] ${data.candle.symbol} - ${data.candle.timeframe}: C: ${data.candle.close}`;
+                const time = new Date().toLocaleTimeString();
+                const logMsg = `[${time}] ${data.candle.symbol} - ${data.candle.timeframe}: C: ${data.candle.close}`;
                 logs.value.unshift(logMsg);
                 if (logs.value.length > 50) logs.value.pop();
             }

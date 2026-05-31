@@ -72,14 +72,27 @@ impl BinanceWsClient {
                     println!("[WS] SUCCESS: Connected to Binance Market Stream!");
                     let (_, mut read) = ws_stream.split();
 
-                    while let Some(msg) = read.next().await {
-                        match msg {
-                            Ok(Message::Text(text)) => {
+                    // Sử dụng timeout để phát hiện mất kết nối (do khóa máy/Sleep)
+                    // Binance gửi Ping mỗi 3 phút, dữ liệu BTC cập nhật mỗi giây.
+                    // Nếu quá 60s không nhận được bất kỳ packet nào -> Chết connection.
+                    loop {
+                        match tokio::time::timeout(Duration::from_secs(60), read.next()).await {
+                            Ok(Some(Ok(Message::Text(text)))) => {
                                 self.handle_message(&text).await;
                             }
-                            Ok(Message::Ping(_)) => {}
-                            Err(e) => {
+                            Ok(Some(Ok(Message::Ping(_)))) | Ok(Some(Ok(Message::Pong(_)))) => {
+                                // Tungstenite tự động trả lời Pong, ta chỉ cần nó để reset timeout.
+                            }
+                            Ok(Some(Err(e))) => {
                                 println!("[WS] Read error: {}", e);
+                                break;
+                            }
+                            Ok(None) => {
+                                println!("[WS] Stream closed by server.");
+                                break;
+                            }
+                            Err(_) => {
+                                println!("[WS] Connection timed out (No data for 60s). Likely OS sleep/Network drop.");
                                 break;
                             }
                             _ => {}

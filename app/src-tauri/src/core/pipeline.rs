@@ -266,7 +266,6 @@ impl DataPipeline {
                     data.market_indices = indices;
                 }
                 
-                info!("[LIVE TICK] {} - {}: C: {}", data.candle.symbol, data.candle.timeframe, data.candle.close);
                 let _ = self.app_handle.emit("market-event", &MarketEvent::CandleUpdated(data.clone()));
                 let _ = self.global_event_tx.send(MarketEvent::CandleUpdated(data));
             }
