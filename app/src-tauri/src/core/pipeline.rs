@@ -149,14 +149,42 @@ impl DataPipeline {
                                 *last_scan = now;
                                 
                                 if let Ok(top_altcoins) = self.metadata_manager.get_top_altcoins().await {
-                                    let snapshots = self.scanner_engine.fetch_real_snapshots(&top_altcoins).await;
+                                    let snapshots = self.scanner_engine.fetch_real_snapshots(&top_altcoins, &self.db).await;
+                                    // 3. Thực hiện quét và chấm điểm RS Z-Score
                                     let shortlist = self.scanner_engine.scan(&context, 0.0, 0.0, &snapshots);
-                                    
+
+                                    // [NGHIỆP VỤ QUAN TRỌNG] Lưu trữ dữ liệu các ứng viên tiềm năng vào Database
+                                    // Điều này phục vụ cho việc tra cứu lịch sử và làm đầu vào cho Phase 3.
+                                    for candidate in &shortlist {
+                                        if let Some(snap) = snapshots.iter().find(|s| s.symbol == candidate.symbol) {
+                                            // Chuyển đổi Snapshot thành NormalizedCandleData để lưu vào DB
+                                            let db_data = NormalizedCandleData {
+                                                timestamp: now,
+                                                candle: crate::core::models::Candle {
+                                                    symbol: snap.symbol.clone(),
+                                                    close: snap.price,
+                                                    is_closed: true,
+                                                    ..Default::default()
+                                                },
+                                                indicators: crate::core::models::Indicators {
+                                                    ema50: Some(snap.ema50_4h),
+                                                    ema200: Some(snap.ema200_4h),
+                                                    ..Default::default()
+                                                },
+                                                microstructure: crate::core::models::Microstructure {
+                                                    oi_change_4h_pct: snap.oi_growth_4h_pct,
+                                                    ..Default::default()
+                                                },
+                                                ..Default::default()
+                                            };
+                                            let _ = self.db.insert_closed_candle(&db_data).await;
+                                        }
+                                    }
+
                                     let payload = ScannerPayload {
                                         scan_timestamp: now,
                                         shortlist,
                                     };
-                                    
                                     let _ = self.app_handle.emit("market-event", &MarketEvent::ScannerUpdated(payload.clone()));
                                     let _ = self.global_event_tx.send(MarketEvent::ScannerUpdated(payload));
                                 }

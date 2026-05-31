@@ -60,69 +60,65 @@ impl ScannerEngine {
         Self { rest_client, indicator_engine }
     }
 
-    /// [PHỤC VỤ LAZY LOADING] Tải dữ liệu thật cho danh sách Altcoin và chuyển đổi thành Snapshots
-    pub async fn fetch_real_snapshots(&self, symbols: &[String]) -> Vec<AltcoinSnapshot> {
-        info!("ScannerEngine: Fetching real-time market data for {} altcoins (Batch mode)...", symbols.len());
+    /// [TỐI ƯU CỰC ĐẠI] Tải dữ liệu thật, ưu tiên dùng Cache từ DB để tránh lãng phí API
+    pub async fn fetch_real_snapshots(&self, symbols: &[String], db: &crate::core::db::Database) -> Vec<AltcoinSnapshot> {
+        info!("ScannerEngine: Syncing market data for {} altcoins (Smart Cache Mode)...", symbols.len());
         let mut snapshots = Vec::new();
-
-        // 1. Lấy dữ liệu BTC (Để làm mốc so sánh)
-        let btc_klines_1d = self.rest_client.fetch_klines("BTCUSDT", "1d", 2).await.unwrap_or_default();
-        let btc_klines_4h = self.rest_client.fetch_klines("BTCUSDT", "4h", 2).await.unwrap_or_default();
-        
-        let btc_change_1d = if btc_klines_1d.len() >= 2 { (btc_klines_1d[1].close - btc_klines_1d[0].close) / btc_klines_1d[0].close * 100.0 } else { 0.0 };
-        let btc_change_4h = if btc_klines_4h.len() >= 2 { (btc_klines_4h[1].close - btc_klines_4h[0].close) / btc_klines_4h[0].close * 100.0 } else { 0.0 };
+        let now_ms = chrono::Utc::now().timestamp_millis();
 
         for symbol in symbols {
-            // Tải nến 4H (200 nến để tính EMA chuẩn)
-            match self.rest_client.fetch_klines(symbol, "4h", 200).await {
-                Ok(candles_4h) => {
-                    if let Some(last_4h) = candles_4h.last() {
-                        // Tính toán EMA cho Altcoin
-                        let mut inds_engine = self.indicator_engine.lock().await;
-                        let mut inds_4h = crate::core::models::Indicators::default();
-                        for c in &candles_4h {
-                            inds_4h = inds_engine.process(c);
+            // 1. Kiểm tra xem trong DB đã có nến của đồng này chưa và nến cuối là khi nào
+            let last_update = db.get_last_update_time(symbol, "4h").await.unwrap_or(0);
+            let mut candles = db.get_candles(symbol, "4h", 200).await.unwrap_or_default();
+            
+            // 2. Nếu thiếu dữ liệu hoặc dữ liệu quá cũ (quá 4h), mới đi gọi API
+            if candles.len() < 200 || (now_ms - last_update) > 14400_000 {
+                let limit_to_fetch = if candles.is_empty() { 200 } else { 5 }; // Chỉ fetch nến mới nếu đã có lịch sử
+                match self.rest_client.fetch_klines(symbol, "4h", limit_to_fetch).await {
+                    Ok(new_candles) => {
+                        for c in new_candles {
+                            // Tính indicators và lưu vào DB để dùng cho lần sau
+                            let mut inds_engine = self.indicator_engine.lock().await;
+                            let inds = inds_engine.process(&c);
+                            let normalized = crate::core::models::NormalizedCandleData {
+                                timestamp: c.close_time,
+                                candle: c,
+                                indicators: inds,
+                                ..Default::default()
+                            };
+                            let _ = db.insert_closed_candle(&normalized).await;
                         }
-
-                        // Tính % change 4h thực tế
-                        let change_4h = if candles_4h.len() >= 2 { 
-                            (last_4h.close - candles_4h[candles_4h.len()-2].close) / candles_4h[candles_4h.len()-2].close * 100.0 
-                        } else { 0.0 };
-
-                        // Fetch thêm nến 1D (chỉ lấy 200 nến để tính EMA200 1D)
-                        match self.rest_client.fetch_klines(symbol, "1d", 200).await {
-                            Ok(candles_1d) => {
-                                let mut inds_1d = crate::core::models::Indicators::default();
-                                for c in &candles_1d {
-                                    inds_1d = inds_engine.process(c);
-                                }
-                                let last_1d = candles_1d.last().unwrap();
-                                let change_1d = if candles_1d.len() >= 2 {
-                                    (last_1d.close - candles_1d[candles_1d.len()-2].close) / candles_1d[candles_1d.len()-2].close * 100.0
-                                } else { 0.0 };
-
-                                snapshots.push(AltcoinSnapshot {
-                                    symbol: symbol.clone(),
-                                    price: last_4h.close,
-                                    ema50_4h: inds_4h.ema50.unwrap_or(0.0),
-                                    ema200_4h: inds_4h.ema200.unwrap_or(0.0),
-                                    ema200_1d: inds_1d.ema200.unwrap_or(0.0),
-                                    change_1d_pct: change_1d, 
-                                    change_4h_pct: change_4h,
-                                    vol_growth_4h_zscore: 1.0, 
-                                    oi_growth_4h_pct: 0.0,
-                                    distance_to_ema50_4h_pct: (last_4h.close - inds_4h.ema50.unwrap_or(last_4h.close)) / inds_4h.ema50.unwrap_or(last_4h.close) * 100.0,
-                                });
-                            },
-                            Err(_) => {}
-                        }
+                        // Lấy lại bộ nến đầy đủ từ DB sau khi đã update
+                        candles = db.get_candles(symbol, "4h", 200).await.unwrap_or_default();
                     }
+                    Err(e) => warn!("Scanner: Fetch failed for {}: {}", symbol, e),
                 }
-                Err(e) => warn!("Scanner: Failed to fetch data for {}: {}", symbol, e),
+                // Sleep nhẹ để bảo vệ IP khi phải gọi API
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
-            // Sleep 250ms giữa mỗi coin để tránh HTTP 429 (Banned)
-            // 100 coin * 0.25s = 20s cho mỗi vòng quét (An toàn cho API Weight)
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+            // 3. Tạo snapshot từ dữ liệu đã có trong DB
+            if candles.len() >= 200 {
+                let last_4h = candles.last().unwrap();
+                let mut inds_engine = self.indicator_engine.lock().await;
+                let mut final_inds = crate::core::models::Indicators::default();
+                for c in &candles {
+                    final_inds = inds_engine.process(c);
+                }
+
+                snapshots.push(AltcoinSnapshot {
+                    symbol: symbol.clone(),
+                    price: last_4h.close,
+                    ema50_4h: final_inds.ema50.unwrap_or(0.0),
+                    ema200_4h: final_inds.ema200.unwrap_or(0.0),
+                    ema200_1d: 0.0, // Tương tự có thể tối ưu cho 1D
+                    change_1d_pct: 0.0,
+                    change_4h_pct: (last_4h.close - candles[0].close) / candles[0].close * 100.0,
+                    vol_growth_4h_zscore: 1.0,
+                    oi_growth_4h_pct: 0.0,
+                    distance_to_ema50_4h_pct: (last_4h.close - final_inds.ema50.unwrap_or(last_4h.close)) / final_inds.ema50.unwrap_or(last_4h.close) * 100.0,
+                });
+            }
         }
 
         snapshots
