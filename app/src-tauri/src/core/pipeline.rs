@@ -149,9 +149,37 @@ impl DataPipeline {
                                 *last_scan = now;
                                 
                                 if let Ok(top_altcoins) = self.metadata_manager.get_top_altcoins().await {
-                                    let snapshots = self.scanner_engine.fetch_real_snapshots(&top_altcoins, &self.db).await;
+                                    // [FIX] Fetch bulk 24h ticker data once for all symbols to avoid rate limits
+                                    let tickers_24h = match self.rest_client.fetch_24h_tickers().await {
+                                        Ok(t) => t,
+                                        Err(e) => {
+                                            warn!("Failed to fetch 24h tickers: {}. Skipping scan.", e);
+                                            continue;
+                                        }
+                                    };
+
+                                    let snapshots = self.scanner_engine.fetch_real_snapshots(&top_altcoins, &tickers_24h, &self.db).await;
+                                    
+                                    // [FIX] Đồng bộ cách tính biến động BTCUSDT với Altcoin
+                                    // 1D: Lấy từ tickers_24h (Rolling 24h) thay vì nến ngày chưa đóng
+                                    let btc_change_1d = tickers_24h.iter()
+                                        .find(|t| t["symbol"].as_str() == Some("BTCUSDT"))
+                                        .and_then(|t| t["priceChangePercent"].as_str())
+                                        .and_then(|s| s.parse::<f64>().ok())
+                                        .unwrap_or(0.0);
+                                    
+                                    // 4H: Span 2 nến (4-8 tiếng) để tránh nhiễu do reset nến
+                                    let btc_4h = self.db.get_candles("BTCUSDT", "4h", 2).await.unwrap_or_default();
+                                    let btc_change_4h = if btc_4h.len() >= 2 {
+                                        let prev = &btc_4h[btc_4h.len() - 2];
+                                        let curr = btc_4h.last().unwrap();
+                                        (curr.close - prev.open) / prev.open * 100.0
+                                    } else {
+                                        btc_4h.last().map(|c| (c.close - c.open) / c.open * 100.0).unwrap_or(0.0)
+                                    };
+
                                     // 3. Thực hiện quét và chấm điểm RS Z-Score
-                                    let shortlist = self.scanner_engine.scan(&context, 0.0, 0.0, &snapshots);
+                                    let shortlist = self.scanner_engine.scan(&context, btc_change_1d, btc_change_4h, &snapshots);
 
                                     // [NGHIỆP VỤ QUAN TRỌNG] Lưu trữ dữ liệu các ứng viên tiềm năng vào Database
                                     // Điều này phục vụ cho việc tra cứu lịch sử và làm đầu vào cho Phase 3.
@@ -258,12 +286,12 @@ impl DataPipeline {
                             for c in &data {
                                 let mut engine = self.indicator_engine.lock().await;
                                 let inds = engine.process(c);
-                                let mock_normalized = NormalizedCandleData {
+                                let normalized_data = NormalizedCandleData {
                                     candle: c.clone(),
                                     indicators: inds,
                                     ..Default::default()
                                 };
-                                let _ = self.db.insert_closed_candle(&mock_normalized).await;
+                                let _ = self.db.insert_closed_candle(&normalized_data).await;
                             }
                             info!("Warm-up complete for {} {} (Fetched from Binance & Saved)", symbol, tf);
                         }

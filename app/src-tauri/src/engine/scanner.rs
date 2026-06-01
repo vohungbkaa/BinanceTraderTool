@@ -61,10 +61,20 @@ impl ScannerEngine {
     }
 
     /// [TỐI ƯU CỰC ĐẠI] Tải dữ liệu thật, ưu tiên dùng Cache từ DB để tránh lãng phí API
-    pub async fn fetch_real_snapshots(&self, symbols: &[String], db: &crate::core::db::Database) -> Vec<AltcoinSnapshot> {
+    pub async fn fetch_real_snapshots(&self, symbols: &[String], tickers_24h: &[serde_json::Value], db: &crate::core::db::Database) -> Vec<AltcoinSnapshot> {
         info!("ScannerEngine: Syncing market data for {} altcoins (Smart Cache Mode)...", symbols.len());
         let mut snapshots = Vec::new();
         let now_ms = chrono::Utc::now().timestamp_millis();
+
+        // Tạo HashMap để tra cứu nhanh ticker 24h
+        let mut ticker_map = std::collections::HashMap::new();
+        for t in tickers_24h {
+            if let (Some(sym), Some(change)) = (t["symbol"].as_str(), t["priceChangePercent"].as_str()) {
+                if let Ok(pct) = change.parse::<f64>() {
+                    ticker_map.insert(sym.to_string(), pct);
+                }
+            }
+        }
 
         for symbol in symbols {
             // 1. Kiểm tra xem trong DB đã có nến của đồng này chưa và nến cuối là khi nào
@@ -72,7 +82,8 @@ impl ScannerEngine {
             let mut candles = db.get_candles(symbol, "4h", 200).await.unwrap_or_default();
             
             // 2. Nếu thiếu dữ liệu hoặc dữ liệu quá cũ (quá 4h), mới đi gọi API
-            if candles.len() < 200 || (now_ms - last_update) > 14400_000 {
+            // [FIX] Rút ngắn Cache 4H xuống còn 15 phút (900_000 ms) để theo kịp thị trường
+            if candles.len() < 200 || (now_ms - last_update) > 900_000 {
                 let limit_to_fetch = if candles.is_empty() { 200 } else { 5 }; // Chỉ fetch nến mới nếu đã có lịch sử
                 match self.rest_client.fetch_klines(symbol, "4h", limit_to_fetch).await {
                     Ok(new_candles) => {
@@ -106,16 +117,53 @@ impl ScannerEngine {
                     final_inds = inds_engine.process(c);
                 }
 
+                // [FIX] Vẫn lấy nến 1D từ DB để tính EMA200
+                let candles_1d = db.get_candles(symbol, "1d", 200).await.unwrap_or_default();
+                let mut ema200_1d = 0.0;
+                if let Some(_last_1d) = candles_1d.last() {
+                    let mut inds_1d = crate::core::models::Indicators::default();
+                    for c in &candles_1d {
+                        inds_1d = inds_engine.process(c);
+                    }
+                    ema200_1d = inds_1d.ema200.unwrap_or(0.0);
+                }
+
+                // [FIX] Lấy change_1d_pct real-time từ Ticker API thay vì nến DB
+                let change_1d_pct = *ticker_map.get(symbol).unwrap_or(&0.0);
+
+                // [FIX] Tính 4H change mượt hơn (Từ Open của nến 4H trước đến Close hiện tại -> span 4-8 tiếng)
+                let change_4h_pct = if candles.len() >= 2 {
+                    let prev = &candles[candles.len() - 2];
+                    (last_4h.close - prev.open) / prev.open * 100.0
+                } else {
+                    (last_4h.close - last_4h.open) / last_4h.open * 100.0
+                };
+
+                // [FIX] Tính Z-Score Volume 4H thực tế dựa trên 20 nến gần nhất thay vì fake 1.0
+                let vol_growth_4h_zscore = if candles.len() >= 20 {
+                    let vols: Vec<f64> = candles.iter().rev().take(20).map(|c| c.volume).collect();
+                    let mean_vol = vols.iter().sum::<f64>() / vols.len() as f64;
+                    let variance = vols.iter().map(|v| (v - mean_vol).powi(2)).sum::<f64>() / (vols.len() - 1).max(1) as f64;
+                    let std_dev = variance.sqrt();
+                    if std_dev > 0.0 {
+                        (last_4h.volume - mean_vol) / std_dev
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
                 snapshots.push(AltcoinSnapshot {
                     symbol: symbol.clone(),
                     price: last_4h.close,
                     ema50_4h: final_inds.ema50.unwrap_or(0.0),
                     ema200_4h: final_inds.ema200.unwrap_or(0.0),
-                    ema200_1d: 0.0, // Tương tự có thể tối ưu cho 1D
-                    change_1d_pct: 0.0,
-                    change_4h_pct: (last_4h.close - candles[0].close) / candles[0].close * 100.0,
-                    vol_growth_4h_zscore: 1.0,
-                    oi_growth_4h_pct: 0.0,
+                    ema200_1d,
+                    change_1d_pct,
+                    change_4h_pct,
+                    vol_growth_4h_zscore,
+                    oi_growth_4h_pct: 0.0, // TODO: Cần data pipeline cho Open Interest
                     distance_to_ema50_4h_pct: (last_4h.close - final_inds.ema50.unwrap_or(last_4h.close)) / final_inds.ema50.unwrap_or(last_4h.close) * 100.0,
                 });
             }
@@ -171,8 +219,18 @@ impl ScannerEngine {
 
         // 3. Đánh giá từng Altcoin
         for (i, alt) in altcoins.iter().enumerate() {
-            // [SPEC 3.A.3] Trọng số Đa khung (4H: 0.7, 1D: 0.3)
-            let final_rs = (zscores_4h[i] * 0.7) + (zscores_1d[i] * 0.3);
+            // [FIX] Nếu biến động của đồng coin và BTC quá nhỏ (thị trường sideway hẹp), 
+            // Z-Score có thể bị khuếch đại vô lý (Ví dụ: -0.5% vs 0% -> Z-Score = -2.0). 
+            // Thêm hệ số làm mượt để tránh các false positive.
+            let is_flat_market = diffs_4h[i].abs() < 1.0 && diffs_1d[i].abs() < 2.0;
+            
+            let final_rs = if is_flat_market {
+                // Trong thị trường quá hẹp, giảm cường độ của Z-Score
+                ((zscores_4h[i] * 0.7) + (zscores_1d[i] * 0.3)) * 0.5
+            } else {
+                (zscores_4h[i] * 0.7) + (zscores_1d[i] * 0.3)
+            };
+            
             let rating = Self::get_rating(final_rs);
 
             // [SPEC 5] Tính Rank Score
@@ -207,15 +265,18 @@ impl ScannerEngine {
                     let price_below_ema = alt.price < alt.ema200_1d && alt.ema50_4h < alt.ema200_4h;
                     let weak_rs = rating == RsRating::D;
                     let oi_increasing = alt.oi_growth_4h_pct > 0.0; // Build-up short
+                    
+                    // [PROTECTION] Không bao giờ Short một đồng coin đang có dòng tiền vào cực mạnh trong ngày (tránh cản tàu hỏa)
+                    let pump_protection = alt.change_1d_pct > 15.0;
 
                     if context.action_mode == ActionMode::AggressiveShort {
-                        if weak_rs && price_below_ema && oi_increasing {
+                        if weak_rs && price_below_ema && oi_increasing && !pump_protection {
                             is_valid = true;
                             direction = "SHORT";
                             reason = "RS Laggard (D), Trend Bearish, Short Build-up";
                         }
                     } else { // Scalp Short
-                        if weak_rs && alt.ema50_4h < alt.ema200_4h {
+                        if weak_rs && alt.ema50_4h < alt.ema200_4h && !pump_protection {
                             is_valid = true;
                             direction = "SHORT";
                             reason = "Weak short-term RS for Scalping";

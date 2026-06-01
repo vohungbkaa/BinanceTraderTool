@@ -51,12 +51,12 @@ impl BreadthEngine {
                         // Lưu cache
                         for c in &data {
                             let inds = state.next(c);
-                            let mock_normalized = crate::core::models::NormalizedCandleData {
+                            let normalized_data = crate::core::models::NormalizedCandleData {
                                 candle: c.clone(),
                                 indicators: inds,
                                 ..Default::default()
                             };
-                            let _ = self.db.insert_closed_candle(&mock_normalized).await;
+                            let _ = self.db.insert_closed_candle(&normalized_data).await;
                         }
                         // Sleep để tránh block IP
                         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
