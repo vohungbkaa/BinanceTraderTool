@@ -266,8 +266,9 @@ impl ScannerEngine {
                     let weak_rs = rating == RsRating::D;
                     let oi_increasing = alt.oi_growth_4h_pct > 0.0; // Build-up short
                     
-                    // [PROTECTION] Không bao giờ Short một đồng coin đang có dòng tiền vào cực mạnh trong ngày (tránh cản tàu hỏa)
-                    let pump_protection = alt.change_1d_pct > 15.0;
+                    // [PROTECTION] Nâng cấp khiên bảo vệ (Pump Protection):
+                    // Không Short nếu coin đang tăng > 5% trong ngày HOẶC đang khỏe hơn BTC > 5% (Tránh dính bull-trap của coin ngược sóng)
+                    let pump_protection = alt.change_1d_pct > 5.0 || diffs_1d[i] > 5.0;
 
                     if context.action_mode == ActionMode::AggressiveShort {
                         if weak_rs && price_below_ema && oi_increasing && !pump_protection {
