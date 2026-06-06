@@ -1,0 +1,8 @@
+@@ -95,6 +95,7 @@
+                         match tokio::time::timeout(Duration::from_secs(60), read.next()).await {
+                             Ok(Some(Ok(Message::Text(text)))) => {
++                                // tracing::debug!("Raw WS msg: {}", text.as_str());
+                                 self.handle_message(text.as_str()).await;
+                             }
+ 
+ 

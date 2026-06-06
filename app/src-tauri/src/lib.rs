@@ -22,12 +22,15 @@ fn get_config() -> serde_json::Value {
     serde_json::to_value(config).unwrap_or_default()
 }
 
+use tracing_subscriber::EnvFilter;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let file_appender = tracing_appender::rolling::daily("./logs", "binance_bot.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     
     tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("app_lib=debug".parse().unwrap()))
         .with_writer(std::io::stdout.and(non_blocking))
         .init();
 

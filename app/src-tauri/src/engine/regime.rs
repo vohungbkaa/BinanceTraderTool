@@ -125,7 +125,8 @@ impl MarketRegimeEngine {
                             if data.candle.symbol == "BTCUSDT" {
                                 let mut trigger_analysis = false;
 
-                                if data.candle.timeframe == "1d" {
+                                let alt_tf = crate::core::config::AppConfig::load().altcoin_analysis_timeframe;
+                                if data.candle.timeframe == alt_tf {
                                     self.latest_1d = Some(data.clone());
                                     trigger_analysis = true;
                                 } else if data.candle.timeframe == "4h" {

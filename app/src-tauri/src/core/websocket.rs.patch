@@ -1,0 +1,19 @@
+--- a/src/core/websocket.rs
++++ b/src/core/websocket.rs
+@@ -143,15 +143,14 @@
+                     let k = &data["k"];
+                     let is_closed = k["x"].as_bool().unwrap_or(false);
+ 
+-                    // Log nhẹ để xác nhận giá nhảy
+                     if is_closed {
+                          tracing::info!("[WS KLINE CLOSED] {} | {} | Price: {} | Vol: {}", 
+                             normalized.candle.symbol, 
+                             normalized.candle.timeframe, 
+                             normalized.candle.close,
+                             normalized.candle.volume
+                         );
+-                    }
+-                        );
+                     } else {
+                         // Bỏ comment dòng dưới nếu muốn thấy live tick từng giây
+                         // println!("[WS KLINE UPDATE] {} | {} | Price: {}", normalized.candle.symbol, normalized.candle.timeframe, normalized.candle.close);

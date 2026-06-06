@@ -241,9 +241,21 @@ impl DataPipeline {
     }
 
     async fn sync_metadata_and_breadth(&mut self) -> Result<()> {
-        let top_100 = self.metadata_manager.get_top_altcoins().await?;
+        let top_alts = self.metadata_manager.get_top_altcoins().await?;
+        
+        // Cập nhật danh sách symbol cho Pipeline (bao gồm BTCUSDT + các Altcoin cấu hình)
+        let mut all_symbols = vec!["BTCUSDT".to_string()];
+        all_symbols.extend(top_alts.clone());
+        self.symbols = all_symbols.clone();
+        
+        // Cập nhật WS Client để nhận live data cho TẤT CẢ timeframes của TẤT CẢ altcoins
+        {
+            let mut ws = self.ws_client.lock().await;
+            ws.update_symbols(all_symbols);
+        }
+
         let mut breadth = self.breadth_engine.lock().await;
-        breadth.update_breadth(&top_100).await?;
+        breadth.update_breadth(&top_alts).await?;
         Ok(())
     }
 
@@ -334,6 +346,7 @@ impl DataPipeline {
                 
                 let alt_tf = crate::core::config::AppConfig::load().altcoin_analysis_timeframe;
                 if data.candle.timeframe == alt_tf {
+                    tracing::info!("[PIPELINE] Altcoin analysis timeframe candle closed: {} [{}]", data.candle.symbol, data.candle.timeframe);
                     data.range_24h_pct = (data.candle.high - data.candle.low) / data.candle.open;
                     data.range_p40_90d = self.db.get_p40_range_90d(&data.candle.symbol).await.unwrap_or(0.0);
                 }
