@@ -45,6 +45,8 @@ impl Database {
                 timeframe TEXT NOT NULL,
                 open_time INTEGER NOT NULL,
                 close_time INTEGER NOT NULL,
+                open_time_str TEXT,
+                close_time_str TEXT,
                 open REAL NOT NULL,
                 high REAL NOT NULL,
                 low REAL NOT NULL,
@@ -74,20 +76,31 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // Thêm cột nếu chưa tồn tại (cho các DB cũ)
+        let _ = sqlx::query("ALTER TABLE closed_candles ADD COLUMN open_time_str TEXT;").execute(&self.pool).await;
+        let _ = sqlx::query("ALTER TABLE closed_candles ADD COLUMN close_time_str TEXT;").execute(&self.pool).await;
+
         Ok(())
     }
 
     pub async fn insert_closed_candle(&self, data: &NormalizedCandleData) -> Result<()> {
+        let open_time_str = chrono::DateTime::from_timestamp_millis(data.candle.open_time)
+            .map(|dt| dt.format("%d:%m:%Y %H:%M:%S").to_string())
+            .unwrap_or_default();
+        let close_time_str = chrono::DateTime::from_timestamp_millis(data.candle.close_time)
+            .map(|dt| dt.format("%d:%m:%Y %H:%M:%S").to_string())
+            .unwrap_or_default();
+
         sqlx::query(
             r#"
             INSERT INTO closed_candles (
-                symbol, timeframe, open_time, close_time, 
+                symbol, timeframe, open_time, close_time, open_time_str, close_time_str,
                 open, high, low, close, volume,
                 ema20, ema50, ema200, atr14, adx14, plus_di, minus_di, structure,
                 oi_change_pct, range_24h_pct, range_p40_90d, atr_surge_ratio,
                 is_warmup
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
             ON CONFLICT(symbol, timeframe, open_time) 
             DO UPDATE SET 
                 close=excluded.close, 
@@ -102,13 +115,17 @@ impl Database {
                 oi_change_pct=excluded.oi_change_pct,
                 range_24h_pct=excluded.range_24h_pct,
                 range_p40_90d=excluded.range_p40_90d,
-                atr_surge_ratio=excluded.atr_surge_ratio
+                atr_surge_ratio=excluded.atr_surge_ratio,
+                open_time_str=excluded.open_time_str,
+                close_time_str=excluded.close_time_str
             "#
         )
         .bind(&data.candle.symbol)
         .bind(&data.candle.timeframe)
         .bind(data.candle.open_time)
         .bind(data.candle.close_time)
+        .bind(open_time_str)
+        .bind(close_time_str)
         .bind(data.candle.open)
         .bind(data.candle.high)
         .bind(data.candle.low)
