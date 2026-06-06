@@ -174,7 +174,7 @@ impl MarketRegimeEngine {
 
         let mut risk_status = RiskStatus::Normal;
         let mut allow_alt_scan = false;
-        let mut market_score = 0;
+        let mut market_score;
         let mut action_mode = ActionMode::OffSystem;
         let mut structural_trend = StructuralTrend::MacroNeutral;
         let mut operational_state = OperationalState::Pullback;
@@ -233,8 +233,8 @@ impl MarketRegimeEngine {
             market_score = 0;
         } else {
             let mut trend_score = 0;
-            let mut risk_score = 20; // Max
-            let mut pos_score = 0;
+            let mut risk_score; // Max
+            let mut pos_score;
             let mut flow_score = 0;
 
             // Trend Score (30)

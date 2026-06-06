@@ -175,8 +175,10 @@ impl Database {
     }
 
     pub async fn get_p40_range_90d(&self, symbol: &str) -> Result<f64> {
-        let rows = sqlx::query("SELECT range_24h_pct FROM closed_candles WHERE symbol = ?1 AND timeframe = '1d' ORDER BY open_time DESC LIMIT 90")
-            .bind(symbol).fetch_all(&self.pool).await?;
+        let config = crate::core::config::AppConfig::load();
+        let tf = config.altcoin_analysis_timeframe;
+        let rows = sqlx::query("SELECT range_24h_pct FROM closed_candles WHERE symbol = ?1 AND timeframe = ?2 ORDER BY open_time DESC LIMIT 90")
+            .bind(symbol).bind(&tf).fetch_all(&self.pool).await?;
         if rows.is_empty() { return Ok(0.0); }
         let mut ranges: Vec<f64> = rows.iter().map(|r| r.get::<f64, _>(0)).collect();
         ranges.sort_by(|a, b| a.partial_cmp(b).unwrap());

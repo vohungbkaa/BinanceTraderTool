@@ -112,9 +112,12 @@ pub struct NormalizedCandleData {
 pub struct AltcoinSnapshot {
     pub symbol: String,
     pub price: f64,
+    pub ema50_15m: f64,
+    pub ema200_15m: f64,
     pub ema50_4h: f64,
     pub ema200_4h: f64,
     pub ema200_1d: f64,
+    pub change_15m_pct: f64,
     pub change_1d_pct: f64,
     pub change_4h_pct: f64,
     pub vol_growth_4h_zscore: f64,

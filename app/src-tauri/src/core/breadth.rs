@@ -30,56 +30,80 @@ impl BreadthEngine {
         let mut count_above_ema200 = 0;
         let total = top_altcoins.len();
         let now_ms = chrono::Utc::now().timestamp_millis();
+        let config = crate::core::config::AppConfig::load();
+        let tf = config.altcoin_analysis_timeframe;
 
         if total == 0 { return Ok(()); }
 
-        for symbol in top_altcoins {
-            // Kiểm tra Cache: Cần 200 nến 1D và dữ liệu phải mới (trong vòng 1 giờ)
-            let last_update = self.db.get_last_update_time(symbol, "1d").await.unwrap_or(0);
-            let candles_in_db = self.db.get_candles(symbol, "1d", 200).await.unwrap_or_default();
-            
-            let is_fresh = (now_ms - last_update) < 3600_000; // 1 giờ
-            let has_enough = candles_in_db.len() >= 200;
+        let mut results = Vec::new();
+        // Chia thành từng nhóm 5 symbols để tải song song
+        for chunk in top_altcoins.chunks(5) {
+            let mut tasks = Vec::new();
+            for symbol in chunk {
+                let symbol = symbol.clone();
+                let db = self.db.clone();
+                let rest_client = self.rest_client.clone();
+                let tf_clone = tf.clone();
+                
+                tasks.push(tokio::spawn(async move {
+                    let last_update = db.get_last_update_time(&symbol, &tf_clone).await.unwrap_or(0);
+                    let candles_in_db = db.get_candles(&symbol, &tf_clone, 200).await.unwrap_or_default();
+                    
+                    let is_fresh = (now_ms - last_update) < 3600_000; // 1 giờ
+                    let has_enough = candles_in_db.len() >= 200;
 
-            let candles = if is_fresh && has_enough {
-                candles_in_db
-            } else {
-                info!("BreadthEngine: Cache stale or incomplete for {}. Fetching from Binance...", symbol);
-                match self.rest_client.fetch_klines(symbol, "1d", 200).await {
-                    Ok(data) => {
-                        let mut state = SymbolIndicatorState::new();
-                        // Lưu cache
-                        for c in &data {
-                            let inds = state.next(c);
-                            let normalized_data = crate::core::models::NormalizedCandleData {
-                                candle: c.clone(),
-                                indicators: inds,
-                                ..Default::default()
-                            };
-                            let _ = self.db.insert_closed_candle(&normalized_data).await;
+                    let candles = if is_fresh && has_enough {
+                        candles_in_db
+                    } else {
+                        info!("BreadthEngine: Cache stale or incomplete for {}. Fetching from Binance...", symbol);
+                        match rest_client.fetch_klines(&symbol, &tf_clone, 200).await {
+                            Ok(data) => {
+                                let mut state = SymbolIndicatorState::new();
+                                for c in &data {
+                                    let inds = state.next(c);
+                                    let normalized_data = crate::core::models::NormalizedCandleData {
+                                        candle: c.clone(),
+                                        indicators: inds,
+                                        ..Default::default()
+                                    };
+                                    let _ = db.insert_closed_candle(&normalized_data).await;
+                                }
+                                data
+                            }
+                            Err(_) => Vec::new(),
                         }
-                        // Sleep để tránh block IP
-                        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-                        data
-                    }
-                    Err(_) => Vec::new(),
-                }
-            };
+                    };
 
-            if let Some(last_candle_val) = candles.last().cloned() {
-                let mut state = SymbolIndicatorState::new();
-                let mut final_indicators = None;
-                for c in candles {
-                    final_indicators = Some(state.next(&c));
-                }
+                    let mut final_indicators = None;
+                    let mut last_close = 0.0;
+                    if let Some(last_candle_val) = candles.last().cloned() {
+                        last_close = last_candle_val.close;
+                        let mut state = SymbolIndicatorState::new();
+                        for c in candles {
+                            final_indicators = Some(state.next(&c));
+                        }
+                    }
+                    (last_close, final_indicators)
+                }));
+            }
 
-                if let Some(inds) = final_indicators {
-                    if let Some(ema50) = inds.ema50 {
-                        if last_candle_val.close > ema50 { count_above_ema50 += 1; }
-                    }
-                    if let Some(ema200) = inds.ema200 {
-                        if last_candle_val.close > ema200 { count_above_ema200 += 1; }
-                    }
+            // Chờ tất cả task trong nhóm hoàn thành
+            for task in tasks {
+                if let Ok(res) = task.await {
+                    results.push(res);
+                }
+            }
+            // Sleep 500ms giữa các nhóm để nhả Rate Limit (rất an toàn)
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+
+        for (last_close, final_indicators) in results {
+            if let Some(inds) = final_indicators {
+                if let Some(ema50) = inds.ema50 {
+                    if last_close > ema50 { count_above_ema50 += 1; }
+                }
+                if let Some(ema200) = inds.ema200 {
+                    if last_close > ema200 { count_above_ema200 += 1; }
                 }
             }
         }

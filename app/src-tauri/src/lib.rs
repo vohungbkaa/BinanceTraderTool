@@ -18,8 +18,8 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn get_config() -> serde_json::Value {
-    let config_file = std::fs::read_to_string("config.json").unwrap_or_else(|_| "{\"timeframes\": [\"15m\", \"4h\", \"1d\"], \"altcoin_count\": 100}".to_string());
-    serde_json::from_str(&config_file).unwrap_or_default()
+    let config = crate::core::config::AppConfig::load();
+    serde_json::to_value(config).unwrap_or_default()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -48,10 +48,12 @@ impl SystemSimulator {
         btc_4h.reverse();
 
         // 3. Tải và xử lý dữ liệu cho từng Altcoin
+        let config = crate::core::config::AppConfig::load();
+        let alt_tf = config.altcoin_analysis_timeframe;
         let mut alt_data_map = std::collections::HashMap::new();
         for alt_sym in &test_alts {
             info!("Fetching and processing real history for {}...", alt_sym);
-            let mut a_1d = self.rest_client.fetch_klines(alt_sym, "1d", limit_1d).await?;
+            let mut a_1d = self.rest_client.fetch_klines(alt_sym, &alt_tf, limit_1d).await?;
             a_1d.reverse();
             let mut a_4h = self.rest_client.fetch_klines(alt_sym, "4h", limit_4h).await?;
             a_4h.reverse();
@@ -134,9 +136,12 @@ impl SystemSimulator {
                                 current_alt_snapshots.push(AltcoinSnapshot {
                                     symbol: alt_sym.to_string(),
                                     price: c4.close,
+                                    ema50_15m: 0.0,
+                                    ema200_15m: 0.0,
                                     ema50_4h: i4.ema50.unwrap_or(0.0),
                                     ema200_4h: i4.ema200.unwrap_or(0.0),
                                     ema200_1d: _i1.ema200.unwrap_or(0.0),
+                                    change_15m_pct: 0.0,
                                     change_1d_pct: (c1.close - c1.open) / c1.open * 100.0,
                                     change_4h_pct: (c4.close - c4.open) / c4.open * 100.0,
                                     vol_growth_4h_zscore: 1.0, // Mocked for now

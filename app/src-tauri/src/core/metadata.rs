@@ -22,9 +22,8 @@ impl MetadataManager {
     pub async fn get_top_altcoins(&self) -> Result<Vec<String>> {
         info!("MetadataManager: Filtering high-quality symbols...");
         
-        let config_file = std::fs::read_to_string("config.json").unwrap_or_else(|_| "{\"altcoin_count\": 100}".to_string());
-        let config: serde_json::Value = serde_json::from_str(&config_file).unwrap_or_default();
-        let limit = config["altcoin_count"].as_u64().unwrap_or(100) as usize;
+        let config = crate::core::config::AppConfig::load();
+        let limit = config.altcoin_count;
         
         let tickers = self.rest_client.fetch_24h_tickers().await?;
         

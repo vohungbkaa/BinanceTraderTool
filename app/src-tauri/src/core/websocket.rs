@@ -23,12 +23,8 @@ impl BinanceWsClient {
         event_tx: mpsc::Sender<MarketEvent>, 
         _system_tx: mpsc::Sender<crate::core::events::SystemEvent>
     ) -> Self {
-        let config_file = std::fs::read_to_string("config.json").unwrap_or_else(|_| "{\"timeframes\": [\"15m\", \"4h\", \"1d\"]}".to_string());
-        let config: serde_json::Value = serde_json::from_str(&config_file).unwrap_or_default();
-        let timeframes: Vec<String> = config["timeframes"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-            .unwrap_or_else(|| vec!["15m".to_string(), "4h".to_string(), "1d".to_string()]);
+        let config = crate::core::config::AppConfig::load();
+        let timeframes = config.timeframes;
 
         Self { 
             symbols: HashSet::new(),
@@ -116,10 +112,23 @@ impl BinanceWsClient {
 
             if data["e"] == "kline" {
                 if let Some(normalized) = self.parse_kline(data.clone()) {
-                    // Log nhẹ để xác nhận giá nhảy
-                    // println!("[LIVE TICK] {}: {}", normalized.candle.symbol, normalized.candle.close);
+                    let k = &data["k"];
+                    let is_closed = k["x"].as_bool().unwrap_or(false);
                     
-                    let event = if normalized.candle.is_closed {
+                    // Log nhẹ để xác nhận giá nhảy
+                    if is_closed {
+                         println!("[WS KLINE CLOSED] {} | {} | Price: {} | Vol: {}", 
+                            normalized.candle.symbol, 
+                            normalized.candle.timeframe, 
+                            normalized.candle.close,
+                            normalized.candle.volume
+                        );
+                    } else {
+                        // Bỏ comment dòng dưới nếu muốn thấy live tick từng giây
+                        // println!("[WS KLINE UPDATE] {} | {} | Price: {}", normalized.candle.symbol, normalized.candle.timeframe, normalized.candle.close);
+                    }
+                    
+                    let event = if is_closed {
                         MarketEvent::CandleClosed(normalized)
                     } else {
                         MarketEvent::CandleUpdated(normalized)

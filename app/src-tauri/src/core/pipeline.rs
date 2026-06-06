@@ -158,7 +158,7 @@ impl DataPipeline {
                                         }
                                     };
 
-                                    let snapshots = self.scanner_engine.fetch_real_snapshots(&top_altcoins, &tickers_24h, &self.db).await;
+                                    let snapshots = self.scanner_engine.fetch_real_snapshots(&top_altcoins, &tickers_24h, self.db.clone()).await;
                                     
                                     // [FIX] Đồng bộ cách tính biến động BTCUSDT với Altcoin
                                     // 1D: Lấy từ tickers_24h (Rolling 24h) thay vì nến ngày chưa đóng
@@ -183,6 +183,7 @@ impl DataPipeline {
 
                                     // [NGHIỆP VỤ QUAN TRỌNG] Lưu trữ dữ liệu các ứng viên tiềm năng vào Database
                                     // Điều này phục vụ cho việc tra cứu lịch sử và làm đầu vào cho Phase 3.
+                                    let alt_tf = crate::core::config::AppConfig::load().altcoin_analysis_timeframe;
                                     for candidate in &shortlist {
                                         if let Some(snap) = snapshots.iter().find(|s| s.symbol == candidate.symbol) {
                                             // Chuyển đổi Snapshot thành NormalizedCandleData để lưu vào DB
@@ -190,6 +191,7 @@ impl DataPipeline {
                                                 timestamp: now,
                                                 candle: crate::core::models::Candle {
                                                     symbol: snap.symbol.clone(),
+                                                    timeframe: alt_tf.clone(),
                                                     close: snap.price,
                                                     is_closed: true,
                                                     ..Default::default()
@@ -247,60 +249,73 @@ impl DataPipeline {
 
     async fn perform_warmup(&mut self) -> Result<()> {
         info!("Performing intelligent warm-up (DB Cache First)...");
-        let timeframes = vec!["15m", "4h", "1d"];
+        let timeframes = load_timeframes_from_config();
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        for symbol in &self.symbols {
-            for tf in &timeframes {
-                let last_update = self.db.get_last_update_time(symbol, tf).await.unwrap_or(0);
-                
-                // [SPEC 2.2] Freshness threshold dựa trên timeframe
-                let interval_ms = match *tf {
-                    "15m" => 15 * 60 * 1000,
-                    "4h" => 4 * 60 * 60 * 1000,
-                    "1d" => 24 * 60 * 60 * 1000,
-                    _ => 3600_000,
-                };
-                
-                let is_fresh = (now_ms - last_update) < interval_ms;
-                let candles = self.db.get_candles(symbol, tf, 200).await?;
-                let has_enough = candles.len() >= 200;
+        for tf in &timeframes {
+            let tf_str = tf.to_string();
+            // Chia lô 5 symbols tải song song để tối ưu tốc độ và Rate Limit
+            for chunk in self.symbols.chunks(5) {
+                let mut tasks = Vec::new();
+                for symbol in chunk {
+                    let symbol = symbol.clone();
+                    let tf = tf_str.clone();
+                    let db = self.db.clone();
+                    let rest_client = self.rest_client.clone();
+                    let indicator_engine = self.indicator_engine.clone();
 
-                if is_fresh && has_enough {
-                    for candle in candles {
-                        let mut engine = self.indicator_engine.lock().await;
-                        let inds = engine.process(&candle);
-                        // [FIX] Cập nhật lại indicators vào DB nếu chúng đang bị NULL
-                        let data = NormalizedCandleData {
-                            candle: candle.clone(),
-                            indicators: inds,
-                            ..Default::default()
-                        };
-                        let _ = self.db.insert_closed_candle(&data).await;
-                    }
-                    info!("Warm-up complete for {} {} (Used DB Cache & Updated Indicators)", symbol, tf);
-                } else {
-                    info!("Fetching fresh data for {} {}: is_fresh={}, count={}", symbol, tf, is_fresh, candles.len());
-                    match self.rest_client.fetch_klines(symbol, tf, 200).await {
-                        Ok(data) => {
-                            for c in &data {
-                                let mut engine = self.indicator_engine.lock().await;
-                                let inds = engine.process(c);
-                                let normalized_data = NormalizedCandleData {
-                                    candle: c.clone(),
+                    tasks.push(tokio::spawn(async move {
+                        let last_update = db.get_last_update_time(&symbol, &tf).await.unwrap_or(0);
+                        
+                        let interval_ms = timeframe_to_ms(&tf);
+                        
+                        let is_fresh = (now_ms - last_update) < interval_ms;
+                        let candles = db.get_candles(&symbol, &tf, 200).await.unwrap_or_default();
+                        let has_enough = candles.len() >= 200;
+
+                        if is_fresh && has_enough {
+                            for candle in candles {
+                                let mut engine = indicator_engine.lock().await;
+                                let inds = engine.process(&candle);
+                                let data = NormalizedCandleData {
+                                    candle: candle.clone(),
                                     indicators: inds,
                                     ..Default::default()
                                 };
-                                let _ = self.db.insert_closed_candle(&normalized_data).await;
+                                let _ = db.insert_closed_candle(&data).await;
                             }
-                            info!("Warm-up complete for {} {} (Fetched from Binance & Saved)", symbol, tf);
+                            info!("Warm-up complete for {} {} (Used DB Cache & Updated Indicators)", symbol, tf);
+                        } else {
+                            info!("Fetching fresh data for {} {}: is_fresh={}, count={}", symbol, tf, is_fresh, candles.len());
+                            match rest_client.fetch_klines(&symbol, &tf, 200).await {
+                                Ok(data) => {
+                                    for c in &data {
+                                        let mut engine = indicator_engine.lock().await;
+                                        let inds = engine.process(c);
+                                        let normalized_data = NormalizedCandleData {
+                                            candle: c.clone(),
+                                            indicators: inds,
+                                            ..Default::default()
+                                        };
+                                        let _ = db.insert_closed_candle(&normalized_data).await;
+                                    }
+                                    info!("Warm-up complete for {} {} (Fetched from Binance & Saved)", symbol, tf);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to fetch {} {}: {}", symbol, tf, e);
+                                }
+                            }
                         }
-                        Err(e) => {
-                            warn!("Failed to fetch {} {}: {}", symbol, tf, e);
-                        }
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    }));
                 }
+
+                // Đợi tất cả tasks trong lô chạy xong
+                for task in tasks {
+                    let _ = task.await;
+                }
+                
+                // Sleep nhẹ để reset Rate Limit (rất an toàn cho Binance Futures)
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             }
         }
         Ok(())
@@ -317,7 +332,8 @@ impl DataPipeline {
                 let mut engine = self.indicator_engine.lock().await;
                 data.indicators = engine.process(&data.candle);
                 
-                if data.candle.timeframe == "1d" {
+                let alt_tf = crate::core::config::AppConfig::load().altcoin_analysis_timeframe;
+                if data.candle.timeframe == alt_tf {
                     data.range_24h_pct = (data.candle.high - data.candle.low) / data.candle.open;
                     data.range_p40_90d = self.db.get_p40_range_90d(&data.candle.symbol).await.unwrap_or(0.0);
                 }
@@ -413,12 +429,7 @@ impl DataPipeline {
         let last_stored = self.db.get_last_update_time(symbol, timeframe).await?;
         if last_stored == 0 { return Ok(()); }
 
-        let interval_ms = match timeframe {
-            "15m" => 15 * 60 * 1000,
-            "4h" => 4 * 60 * 60 * 1000,
-            "1d" => 24 * 60 * 60 * 1000,
-            _ => 60000,
-        };
+        let interval_ms = timeframe_to_ms(timeframe);
 
         let gap = current_open_time - last_stored;
         if gap > (interval_ms as f64 * 1.5) as i64 {
@@ -439,5 +450,22 @@ impl DataPipeline {
             }
         }
         Ok(())
+    }
+}
+
+fn load_timeframes_from_config() -> Vec<String> {
+    crate::core::config::AppConfig::load().timeframes
+}
+
+fn timeframe_to_ms(tf: &str) -> i64 {
+    let num_str: String = tf.chars().take_while(|c| c.is_numeric()).collect();
+    let unit: String = tf.chars().skip_while(|c| c.is_numeric()).collect();
+    let num = num_str.parse::<i64>().unwrap_or(1);
+    match unit.as_str() {
+        "m" => num * 60 * 1000,
+        "h" => num * 60 * 60 * 1000,
+        "d" => num * 24 * 60 * 60 * 1000,
+        "w" => num * 7 * 24 * 60 * 60 * 1000,
+        _ => 3600_000,
     }
 }
