@@ -61,10 +61,10 @@ impl ScannerEngine {
     }
 
     /// [TỐI ƯU CỰC ĐẠI] Lấy dữ liệu CHỈ TỪ DB (Closed Candles) kết hợp giá Live Ticker
+    /// [TỐI ƯU CỰC ĐẠI] Lấy dữ liệu CHỈ TỪ DB (Closed Candles) kết hợp giá Live Ticker
     pub async fn fetch_real_snapshots(&self, symbols: &[String], tickers_24h: &[serde_json::Value], db: std::sync::Arc<crate::core::db::Database>) -> Vec<AltcoinSnapshot> {
         info!("ScannerEngine: Calculating snapshots from DB & Live Tickers...");
-        let mut snapshots = Vec::new();
-
+        
         // Tạo HashMap để tra cứu nhanh ticker 24h
         let mut ticker_map = std::collections::HashMap::new();
         for t in tickers_24h {
@@ -75,7 +75,6 @@ impl ScannerEngine {
             }
         }
 
-        // Tối ưu DB queries bằng cách spawn đồng thời
         let mut tasks = Vec::new();
         let config = crate::core::config::AppConfig::load();
         let alt_tf = config.altcoin_analysis_timeframe;
@@ -84,99 +83,73 @@ impl ScannerEngine {
             let symbol = symbol.clone();
             let db = db.clone();
             let live_data = ticker_map.get(&symbol).cloned();
-            let indicator_engine = self.indicator_engine.clone();
             let alt_tf = alt_tf.clone();
 
             tasks.push(tokio::spawn(async move {
                 if let Some((live_price, change_1d_pct)) = live_data {
-                    // Lấy nến đóng gần nhất từ DB cho 15m, 4H, 1D
-                    let candles_15m = db.get_candles(&symbol, "15m", 200).await.unwrap_or_default();
-                    let candles_4h = db.get_candles(&symbol, "4h", 200).await.unwrap_or_default();
-                    let candles_1d = db.get_candles(&symbol, &alt_tf, 200).await.unwrap_or_default();
+                    // Lấy nến đóng gần nhất từ DB cho 15m, 4H, 1D (đã có sẵn Indicators)
+                    let data_15m = db.get_candles_with_indicators(&symbol, "15m", 1).await.unwrap_or_default();
+                    let data_4h = db.get_candles_with_indicators(&symbol, "4h", 2).await.unwrap_or_default();
+                    let data_1d = db.get_candles_with_indicators(&symbol, &alt_tf, 1).await.unwrap_or_default();
 
-                    let mut inds_engine = indicator_engine.lock().await;
-
-                    // Tính Indicators 15m
-                    let mut ema50_15m = 0.0;
-                    let mut ema200_15m = 0.0;
-                    let mut change_15m_pct = 0.0;
-                    if candles_15m.len() >= 200 {
-                        let mut final_inds = crate::core::models::Indicators::default();
-                        for c in &candles_15m { final_inds = inds_engine.process(c); }
-                        ema50_15m = final_inds.ema50.unwrap_or(0.0);
-                        ema200_15m = final_inds.ema200.unwrap_or(0.0);
-                        
-                        // Change 15m tính từ nến đóng trước đó đến giá Live
-                        let prev_close = candles_15m.last().unwrap().close;
-                        change_15m_pct = (live_price - prev_close) / prev_close * 100.0;
-                    }
-
-                    // Tính Indicators 4H và Volume Z-Score
-                    let mut ema50_4h = 0.0;
-                    let mut ema200_4h = 0.0;
-                    let mut change_4h_pct = 0.0;
-                    let mut vol_growth_4h_zscore = 0.0;
-                    if candles_4h.len() >= 200 {
-                        let mut final_inds = crate::core::models::Indicators::default();
-                        for c in &candles_4h { final_inds = inds_engine.process(c); }
-                        ema50_4h = final_inds.ema50.unwrap_or(0.0);
-                        ema200_4h = final_inds.ema200.unwrap_or(0.0);
-
-                        // Change 4H span 2 nến + live price
-                        if candles_4h.len() >= 2 {
-                            let ref_open = candles_4h[candles_4h.len() - 2].open;
-                            change_4h_pct = (live_price - ref_open) / ref_open * 100.0;
-                        }
-
-                        // Z-Score Volume (Dựa trên 20 nến 4H quá khứ + current)
-                        let vols: Vec<f64> = candles_4h.iter().rev().take(20).map(|c| c.volume).collect();
-                        let mean_vol = vols.iter().sum::<f64>() / vols.len().max(1) as f64;
-                        let variance = vols.iter().map(|v| (v - mean_vol).powi(2)).sum::<f64>() / (vols.len() - 1).max(1) as f64;
-                        let std_dev = variance.sqrt();
-                        if std_dev > 0.0 {
-                            let last_vol = candles_4h.last().unwrap().volume; // Cần thay bằng live volume nếu có
-                            vol_growth_4h_zscore = (last_vol - mean_vol) / std_dev;
-                        }
-                    }
-
-                    // Tính Indicators 1D
-                    let mut ema200_1d = 0.0;
-                    if candles_1d.len() >= 200 {
-                        let mut final_inds = crate::core::models::Indicators::default();
-                        for c in &candles_1d { final_inds = inds_engine.process(c); }
-                        ema200_1d = final_inds.ema200.unwrap_or(0.0);
-                    }
-
-                    let distance_to_ema50_4h_pct = if ema50_4h > 0.0 {
-                        (live_price - ema50_4h) / ema50_4h * 100.0
-                    } else { 0.0 };
-
-                    return Some(AltcoinSnapshot {
-                        symbol,
+                    let mut snap = AltcoinSnapshot {
+                        symbol: symbol.clone(),
                         price: live_price,
-                        ema50_15m,
-                        ema200_15m,
-                        ema50_4h,
-                        ema200_4h,
-                        ema200_1d,
-                        change_15m_pct,
                         change_1d_pct,
-                        change_4h_pct,
-                        vol_growth_4h_zscore,
-                        oi_growth_4h_pct: 0.0, // TODO: OI Pipeline
-                        distance_to_ema50_4h_pct,
-                    });
+                        ..Default::default()
+                    };
+
+                    // 1. Dữ liệu 15m
+                    if let Some(d) = data_15m.last() {
+                        snap.ema50_15m = d.indicators.ema50.unwrap_or(0.0);
+                        snap.ema200_15m = d.indicators.ema200.unwrap_or(0.0);
+                        snap.change_15m_pct = (live_price - d.candle.close) / d.candle.close * 100.0;
+                    }
+
+                    // 2. Dữ liệu 4H
+                    if let Some(d) = data_4h.last() {
+                        snap.ema50_4h = d.indicators.ema50.unwrap_or(0.0);
+                        snap.ema200_4h = d.indicators.ema200.unwrap_or(0.0);
+                        
+                        if data_4h.len() >= 2 {
+                            let ref_open = data_4h[0].candle.open;
+                            snap.change_4h_pct = (live_price - ref_open) / ref_open * 100.0;
+                        }
+
+                        // Z-Score Volume 4H
+                        let candles_4h_raw = db.get_candles(&symbol, "4h", 20).await.unwrap_or_default();
+                        if candles_4h_raw.len() >= 2 {
+                            let vols: Vec<f64> = candles_4h_raw.iter().map(|c| c.volume).collect();
+                            let mean_vol = vols.iter().sum::<f64>() / vols.len() as f64;
+                            let variance = vols.iter().map(|v| (v - mean_vol).powi(2)).sum::<f64>() / (vols.len() - 1).max(1) as f64;
+                            let std_dev = variance.sqrt();
+                            if std_dev > 0.0 {
+                                snap.vol_growth_4h_zscore = (candles_4h_raw.last().unwrap().volume - mean_vol) / std_dev;
+                            }
+                        }
+                    }
+
+                    // 3. Dữ liệu 1D
+                    if let Some(d) = data_1d.last() {
+                        snap.ema200_1d = d.indicators.ema200.unwrap_or(0.0);
+                    }
+
+                    if snap.ema50_4h > 0.0 {
+                        snap.distance_to_ema50_4h_pct = (live_price - snap.ema50_4h) / snap.ema50_4h * 100.0;
+                    }
+
+                    return Some(snap);
                 }
                 None
             }));
         }
 
+        let mut snapshots = Vec::new();
         for task in tasks {
             if let Ok(Some(snap)) = task.await {
                 snapshots.push(snap);
             }
         }
-
         snapshots
     }
 
