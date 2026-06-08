@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::models::{NormalizedCandleData, TrendDirection};
 use crate::core::events::MarketEvent;
 use tokio::sync::broadcast;
-use tracing::{info, error};
+use tracing::{info, error, debug};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum StructuralTrend {
@@ -171,7 +171,7 @@ impl MarketRegimeEngine {
     }
 
     async fn analyze(&self, current_data: &NormalizedCandleData) -> MarketRegimeContext {
-        info!("Phase 1: Analyzing Market Regime for {}...", current_data.candle.symbol);
+        // debug!("Phase 1: Analyzing Market Regime for {}...", current_data.candle.symbol);
 
         let mut risk_status = RiskStatus::Normal;
         let mut allow_alt_scan = false;
@@ -325,7 +325,7 @@ impl MarketRegimeEngine {
             action_mode,
         };
 
-        info!("Phase 1: Analysis Complete. Score: {}, Bias: {}", context.market_score, context.action_mode);
+        // debug!("Phase 1: Analysis Complete. Score: {}, Bias: {}", context.market_score, context.action_mode);
         context
     }
 }

@@ -85,10 +85,10 @@ impl Database {
 
     pub async fn insert_closed_candle(&self, data: &NormalizedCandleData) -> Result<()> {
         let open_time_str = chrono::DateTime::from_timestamp_millis(data.candle.open_time)
-            .map(|dt| dt.format("%d:%m:%Y %H:%M:%S").to_string())
+            .map(|dt| dt.with_timezone(&chrono::Local).format("%d:%m:%Y %H:%M:%S").to_string())
             .unwrap_or_default();
         let close_time_str = chrono::DateTime::from_timestamp_millis(data.candle.close_time)
-            .map(|dt| dt.format("%d:%m:%Y %H:%M:%S").to_string())
+            .map(|dt| dt.with_timezone(&chrono::Local).format("%d:%m:%Y %H:%M:%S").to_string())
             .unwrap_or_default();
 
         sqlx::query(

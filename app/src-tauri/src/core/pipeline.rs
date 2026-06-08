@@ -103,13 +103,16 @@ impl DataPipeline {
                 tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
                 info!("Scheduled sync: Updating Top 100 Symbols and Market Breadth...");
                 if let Ok(top_100) = metadata_manager_clone.get_top_altcoins().await {
-                    let mut engine = breadth_engine_clone.lock().await;
-                    let _ = engine.update_breadth(&top_100).await;
+                    let breadth_ema50 = {
+                        let mut engine = breadth_engine_clone.lock().await;
+                        let _ = engine.update_breadth(&top_100).await;
+                        engine.market_breadth_ema50
+                    };
                     
                     // [SPEC 2.3] Cập nhật xu hướng TOTAL3 (Ước tính dựa trên Breadth)
                     let mut risk = risk_manager_for_total3.lock().await;
                     use crate::core::models::TrendDirection;
-                    risk.total3_trend = if engine.market_breadth_ema50 > 50.0 { TrendDirection::Up } else { TrendDirection::Down };
+                    risk.total3_trend = if breadth_ema50 > 50.0 { TrendDirection::Up } else { TrendDirection::Down };
                 }
             }
         });
@@ -301,15 +304,19 @@ impl DataPipeline {
                             info!("Fetching fresh data for {} {}: is_fresh={}, count={}", symbol, tf, is_fresh, candles.len());
                             match rest_client.fetch_klines(&symbol, &tf, 200).await {
                                 Ok(data) => {
+                                    let now_ms = chrono::Utc::now().timestamp_millis();
                                     for c in &data {
-                                        let mut engine = indicator_engine.lock().await;
-                                        let inds = engine.process(c);
-                                        let normalized_data = NormalizedCandleData {
-                                            candle: c.clone(),
-                                            indicators: inds,
-                                            ..Default::default()
-                                        };
-                                        let _ = db.insert_closed_candle(&normalized_data).await;
+                                        // CHỈ lưu vào DB nếu nến ĐÃ THỰC SỰ KẾT THÚC (close_time < now)
+                                        if c.close_time < now_ms {
+                                            let mut engine = indicator_engine.lock().await;
+                                            let inds = engine.process(c);
+                                            let normalized_data = NormalizedCandleData {
+                                                candle: c.clone(),
+                                                indicators: inds,
+                                                ..Default::default()
+                                            };
+                                            let _ = db.insert_closed_candle(&normalized_data).await;
+                                        }
                                     }
                                     info!("Warm-up complete for {} {} (Fetched from Binance & Saved)", symbol, tf);
                                 }

@@ -23,6 +23,15 @@ fn get_config() -> serde_json::Value {
 }
 
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::time::FormatTime;
+
+struct LocalTimer;
+
+impl FormatTime for LocalTimer {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"))
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -31,6 +40,7 @@ pub fn run() {
     
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("app_lib=debug".parse().unwrap()))
+        .with_timer(LocalTimer)
         .with_writer(std::io::stdout.and(non_blocking))
         .init();
 
