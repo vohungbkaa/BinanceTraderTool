@@ -28,6 +28,7 @@ pub struct ScanMetrics {
     pub vol_growth_4h_pct: f64,
     pub oi_growth_4h_pct: f64,
     pub distance_to_ema50_4h_pct: f64,
+    pub funding_rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +287,7 @@ impl ScannerEngine {
                         vol_growth_4h_pct: alt.vol_growth_4h_zscore,
                         oi_growth_4h_pct: alt.oi_growth_4h_pct,
                         distance_to_ema50_4h_pct: alt.distance_to_ema50_4h_pct,
+                        funding_rate: alt.funding_rate,
                     },
                     reason: reason.to_string(),
                 });

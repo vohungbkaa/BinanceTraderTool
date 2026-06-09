@@ -103,6 +103,7 @@ impl RiskManager {
             funding_rate_avg: *self.symbol_funding.get(symbol).unwrap_or(&0.01),
             liquidation_surge_detected: self.recent_liquidations_usd > 10_000_000.0,
             spread_anomaly: false,
+            ..Default::default()
         }
     }
 

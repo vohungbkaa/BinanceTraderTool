@@ -48,6 +48,8 @@ const formatTime = (ts: number) => {
             <th class="px-4 py-3 font-black">Symbol</th>
             <th class="px-4 py-3 font-black text-center">Rating</th>
             <th class="px-4 py-3 font-black text-center">Direction</th>
+            <th class="px-4 py-3 font-black text-right">Funding</th>
+            <th class="px-4 py-3 font-black text-right">OI 4H</th>
             <th class="px-4 py-3 font-black text-right">RS Score</th>
             <th class="px-4 py-3 font-black text-right">Rank</th>
             <th class="px-4 py-3 font-black">Reason</th>
@@ -74,6 +76,12 @@ const formatTime = (ts: number) => {
                 </span>
               </div>
             </td>
+            <td class="px-4 py-4 text-right font-mono" :class="alt.metrics.funding_rate < -0.05 ? 'text-red-400' : (alt.metrics.funding_rate > 0.05 ? 'text-green-400' : 'text-gray-400')">
+              {{ formatNum(alt.metrics.funding_rate * 100) }}%
+            </td>
+            <td class="px-4 py-4 text-right font-mono" :class="alt.metrics.oi_growth_4h_pct > 0 ? 'text-green-400' : 'text-red-400'">
+              <span v-if="alt.metrics.oi_growth_4h_pct > 0">+</span>{{ formatNum(alt.metrics.oi_growth_4h_pct) }}%
+            </td>
             <td class="px-4 py-4 text-right font-mono text-gray-300">
               {{ formatNum(alt.rs_score) }}
             </td>
@@ -89,7 +97,7 @@ const formatTime = (ts: number) => {
           
           <!-- Empty State -->
           <tr v-if="shortlist.length === 0">
-            <td colspan="6" class="py-20 text-center">
+            <td colspan="8" class="py-20 text-center">
               <div class="flex flex-col items-center gap-3 opacity-20">
                 <Search class="w-12 h-12" />
                 <p class="text-sm font-bold uppercase tracking-widest">No active signals found</p>

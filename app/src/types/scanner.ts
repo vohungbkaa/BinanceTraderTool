@@ -2,6 +2,7 @@ export interface ScanMetrics {
     vol_growth_4h_pct: number;
     oi_growth_4h_pct: number;
     distance_to_ema50_4h_pct: number;
+    funding_rate: number;
 }
 
 export interface ScanCandidate {

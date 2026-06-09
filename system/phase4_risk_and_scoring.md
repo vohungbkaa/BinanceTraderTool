@@ -51,12 +51,13 @@ Bạn phải xác định mức Chốt lời (Take Profit - TP) dựa trên SL K
 - *Giới hạn (Cap):* Không bao giờ sử dụng đòn bẩy vượt quá 20x đối với Altcoin, bất kể Stoploss có ngắn đến đâu để đề phòng trượt giá (Slippage/Wick).
 
 ## 6. QUẢN TRỊ RỦI RO CẤP HỆ THỐNG (PORTFOLIO KILL-SWITCHES)
-Trước khi duyệt lệnh, bạn phải check các điều kiện sống còn của toàn bộ Danh mục (Portfolio):
+Trước khi duyệt lệnh, bạn phải check các điều kiện sống còn của toàn bộ Danh mục (Portfolio) và môi trường vi mô:
 
 1. **Max Daily Drawdown (Sụt giảm tối đa trong ngày):** Nếu `daily_drawdown_pct` > 5%, Bác bỏ mọi lệnh mới. Khóa hệ thống đến 00:00 UTC ngày hôm sau.
 2. **Max Concurrent Positions (Số lệnh mở tối đa):** Không vượt quá 3 lệnh cùng lúc. Nếu `current_open_positions` >= 3, Bác bỏ lệnh.
 3. **Sector Correlation (Tương quan ngành):** Tránh mở 2 lệnh Long cùng một nhóm ngành (Ví dụ: Lỡ Long PEPE rồi thì không Long DOGE nữa).
 4. **Max Exposure (Tổng dư nợ):** Tổng Giá trị Danh nghĩa (Total Notional Value) của tất cả các lệnh đang mở không được vượt quá `3x` Account Balance.
+5. **Liquidation Heatmap Trap (Bẫy Thanh Lý):** Nếu khoảng cách từ Entry đến cụm thanh lý (Liquidation Cluster) ngược hướng < khoảng cách đến Take Profit, Veto lệnh để tránh bị Squeeze. (Ví dụ: Định Short nhưng giá nằm ngay dưới cụm Short Liquidation lớn).
 
 ## 7. CẤU TRÚC ĐẦU RA YÊU CẦU CHO PHASE 5 (JSON OUTPUT)
 Nếu lệnh vượt qua tất cả các bài test Toán học và Portfolio, Agent Phase 4 sẽ xuất Payload cuối cùng để Phase 5 gửi API lên sàn Binance.

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { X, BookOpen, Info, Target, AlertTriangle } from '@lucide/vue';
+import { X, BookOpen, Target, AlertTriangle } from '@lucide/vue';
 
 defineProps<{
   show: boolean;

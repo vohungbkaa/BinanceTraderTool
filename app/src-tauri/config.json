@@ -1,5 +1,5 @@
 {
   "timeframes": ["15m", "4h", "1d"],
-  "altcoin_count": 3,
+  "altcoin_count": 100,
   "altcoin_analysis_timeframe": "1d"
 }

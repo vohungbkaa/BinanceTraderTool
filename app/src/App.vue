@@ -53,9 +53,9 @@ onMounted(() => {
 
       <!-- Right Column: Logs & Risk -->
       <div class="col-span-12 lg:col-span-4 space-y-6">
-        <RiskMonitor 
-          next-event="FOMC Meeting" 
-          liquidation-status="Normal" 
+        <RiskMonitor
+          next-event="FOMC Meeting"
+          :microstructure="market.btcData['15m']?.microstructure || market.btcData['4h']?.microstructure || null"
         />
         
         <LogStream :logs="market.logs" />

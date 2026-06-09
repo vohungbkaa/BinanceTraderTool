@@ -35,6 +35,8 @@ Dựa trên yêu cầu đánh giá bối cảnh vĩ mô tại Phase 1 (`phase1_m
 ### 2.3. Dữ liệu Dòng tiền và Vị thế (Flow & Positioning Data)
 - **Open Interest (OI):** Theo dõi sự thay đổi của OI để đánh giá Build-up/Covering.
 - **Funding Rate:** Thu thập Funding rate toàn thị trường để phát hiện các bẫy giao dịch đông đúc (Crowded Trade).
+- **CVD (Cumulative Volume Delta):** Phân tích lệnh chủ động (Market Order) để xác định phe Mua hay phe Bán đang kiểm soát dòng tiền thực tế.
+- **Liquidation Heatmap:** Xác định các cụm thanh lý (Liquidation Clusters) ở phía trên và phía dưới giá hiện tại để đo lường từ trường thanh khoản.
 - **Dữ liệu Tổng hợp (Macro Indices):** 
   - Xu hướng Tỷ lệ thống trị của BTC (BTC.D).
   - Xu hướng tỷ lệ TOTAL3 / BTC (sức mạnh Altcoin).
@@ -51,7 +53,7 @@ Dựa trên yêu cầu đánh giá bối cảnh vĩ mô tại Phase 1 (`phase1_m
    - Dùng khối dữ liệu `1D` (Close, EMA200, Structure) để gán nhãn `Macro_Bullish` hay `Macro_Bearish`. Định hình vị thế giao dịch (Bias).
    - Dùng khối dữ liệu `4H` (EMA50, EMA200, ADX, DI) để gán nhãn `Active_Bullish`, `Pullback`, hay `Dynamic_Sideway`. Quyết định xem đây có phải là "thời điểm" tốt để kích hoạt Scanner không.
 3. **Phân tích Dòng tiền & Độ rộng:** Nhận `market_breadth_pct`, `btc_d_trend`, `total3_btc_trend` để xác nhận xem Altcoin có thực sự đang hút dòng tiền (Altcoin Season) hay không.
-4. **Đánh giá Động lượng (Positioning):** Áp dụng ma trận giá và OI (so sánh `price_change_4h_pct` và `oi_change_4h_pct`) để ra điểm hệ số vị thế (Trend Healthy hay Squeeze/Deleveraging).
+4. **Đánh giá Động lượng (Positioning):** Áp dụng ma trận giá và OI (so sánh `price_change_4h_pct` và `oi_change_4h_pct`) kết hợp `cvd` để ra điểm hệ số vị thế (Trend Healthy hay Squeeze/Deleveraging). Phân tích `liquidation_upper_cluster` và `liquidation_lower_cluster` để né bẫy thanh khoản.
 5. **Ra quyết định:** Phase 1 tổng hợp tất cả thành `market_score`. Nếu Điểm > 40 và Rủi ro an toàn, Phase 1 xuất tín hiệu `allow_alt_scan = true` để mở cửa cho Phase 2 (Altcoin Scanner).
 
 ---
@@ -96,7 +98,10 @@ Dưới đây là cấu trúc JSON Data Payload chuẩn mực mà Phase 0 phải
     "oi_change_4h_pct": 5.2,
     "price_change_4h_pct": 2.1,
     "funding_rate_avg": 0.01,
+    "cvd": 1500.5,
     "liquidation_surge_detected": false,
+    "liquidation_upper_cluster": 69500.0,
+    "liquidation_lower_cluster": 67200.0,
     "spread_anomaly": false
   },
   "macro_events": {

@@ -147,6 +147,7 @@ impl SystemSimulator {
                                     vol_growth_4h_zscore: 1.0, // Mocked for now
                                     oi_growth_4h_pct: 5.0,     // Mocked for now
                                     distance_to_ema50_4h_pct: (c4.close - i4.ema50.unwrap_or(0.0)) / i4.ema50.unwrap_or(1.0) * 100.0,
+                                    ..Default::default()
                                 });
                             }
                         }

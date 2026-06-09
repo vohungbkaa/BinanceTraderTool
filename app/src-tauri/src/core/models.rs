@@ -45,7 +45,10 @@ pub struct Microstructure {
     pub oi_change_4h_pct: f64,
     pub price_change_4h_pct: f64,
     pub funding_rate_avg: f64,
+    pub cvd: f64,
     pub liquidation_surge_detected: bool,
+    pub liquidation_upper_cluster: f64,
+    pub liquidation_lower_cluster: f64,
     pub spread_anomaly: bool,
 }
 
@@ -108,7 +111,7 @@ pub struct NormalizedCandleData {
     pub atr_surge_ratio: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct AltcoinSnapshot {
     pub symbol: String,
     pub price: f64,
@@ -123,6 +126,7 @@ pub struct AltcoinSnapshot {
     pub vol_growth_4h_zscore: f64,
     pub oi_growth_4h_pct: f64,
     pub distance_to_ema50_4h_pct: f64,
+    pub funding_rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

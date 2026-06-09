@@ -66,16 +66,18 @@ Sử dụng dữ liệu đa chiều để xác nhận "Altcoin Season" một cá
 - **Quy tắc Xác nhận (Action Mode):** Hệ thống chỉ kích hoạt chiến lược Long Altcoin tấn công (Aggressive) khi: BTC.D giảm/đi ngang + Breadth Altcoin > EMA50 đang tăng + TOTAL3/BTC dốc lên.
 
 ## 5. MA TRẬN ĐÁNH GIÁ VỊ THẾ & ĐỘNG LƯỢNG (POSITIONING SCORECARD)
-Agent đánh giá chất lượng nhịp chuyển động thông qua ma trận Harga (Price) & Hợp đồng mở (OI):
+Agent đánh giá chất lượng nhịp chuyển động thông qua ma trận Harga (Price), Hợp đồng mở (OI) và Lệnh chủ động (CVD):
 
-| Biến Động Giá | Open Interest (OI) | Chuẩn Đoán Trạng Thái | Điểm Hệ Số (0-10) | Hành Động / Rủi Ro |
-| :--- | :--- | :--- | :--- | :--- |
-| **TĂNG** | **TĂNG** | **Trend Healthy** | 9 | Dòng tiền mua mới (Long) rất tốt, bền vững. |
-| **TĂNG** | **GIẢM** | **Short Cover (Squeeze)** | 4 | Đẩy giá do phe Short cắt lỗ, kém bền vững. |
-| **GIẢM** | **TĂNG** | **Build-up Short** | 8 (Cho Short) | Dòng tiền bán khống áp đảo hoặc bẫy Bear Trap. |
-| **GIẢM** | **GIẢM** | **Deleveraging** | 3 | Thanh khoản cạn, rút vị thế diện rộng. |
+| Biến Động Giá | Open Interest (OI) | CVD (Lệnh chủ động) | Chuẩn Đoán Trạng Thái | Điểm Hệ Số (0-10) | Hành Động / Rủi Ro |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TĂNG** | **TĂNG** | **DƯƠNG MẠNH** | **Trend Healthy** | 9 | Dòng tiền mua mới (Long) rất tốt, bền vững. |
+| **TĂNG** | **GIẢM** | **ÂM/ĐI NGANG** | **Short Cover (Squeeze)** | 4 | Đẩy giá do phe Short cắt lỗ, kém bền vững. |
+| **GIẢM** | **TĂNG** | **ÂM MẠNH** | **Build-up Short** | 8 (Cho Short) | Dòng tiền bán khống áp đảo hoặc bẫy Bear Trap. |
+| **GIẢM** | **GIẢM** | **DƯƠNG/ĐI NGANG** | **Deleveraging** | 3 | Thanh khoản cạn, phe Long bị ép đóng vị thế. |
 
-*Bộ lọc Funding Rate:* Hệ thống trừ điểm (penalty) vị thế nếu mức Funding Rate bị méo lệch quá mức, mang dấu hiệu của một "Crowded Trade" (Giao dịch quá đông đúc tại một phe).
+*Bộ lọc Funding Rate & Heatmap:*
+- Hệ thống trừ điểm (penalty) vị thế nếu mức Funding Rate bị méo lệch quá mức (âm nặng khi Short hoặc dương mạnh khi Long), mang dấu hiệu của một "Crowded Trade" (Giao dịch quá đông đúc tại một phe).
+- Hệ thống sẽ gắn cờ rủi ro (Risk Alert) nếu giá hiện tại nằm ngay sát cụm thanh lý lớn (Liquidation Clusters) nhưng CVD ngược hướng (ví dụ: Chuẩn bị Short nhưng giá nằm ngay dưới một cụm Short Liquidation khổng lồ, dễ bị Squeeze).
 
 ## 6. THUẬT TOÁN CHẤM ĐIỂM (COMPOSITE MARKET SCORE)
 Agent sử dụng công thức tổng hợp sau để ra điểm số cuối cùng mà không bị tính trùng lặp (Double-Counting):
@@ -83,8 +85,8 @@ Agent sử dụng công thức tổng hợp sau để ra điểm số cuối cù
 `Market_Score = (Trend_Score * 0.3) + (Risk_Score * 0.2) + (Positioning_Score * 0.2) + (Flow_Score * 0.3)`
 
 - **Trend Score (30%):** Dựa trên độ lệch EMA, cấu trúc giá, sức mạnh ADX.
-- **Risk Score (20%):** Dựa trên ATR percentile và độ ổn định của Liquidation. (Điểm cao = Ít rủi ro).
-- **Positioning Score (20%):** Dựa trên ma trận Giá vs. OI (Bảng trên).
+- **Risk Score (20%):** Dựa trên ATR percentile, độ ổn định của Liquidation, Funding Rate penalty và khoảng cách đến Liquidation Clusters. (Điểm cao = Ít rủi ro).
+- **Positioning Score (20%):** Dựa trên ma trận Giá, OI và CVD (Bảng trên).
 - **Flow Score (30%):** Dựa trên Altcoin Breadth và TOTAL3/BTC.
 
 *Điều kiện đệm (Hysteresis & Minimum Duration):* Bất kỳ trạng thái mới nào muốn áp dụng Full Allocation cần duy trì ổn định ít nhất qua 3 nến 4H. Tránh nhiễu (Fakeout).

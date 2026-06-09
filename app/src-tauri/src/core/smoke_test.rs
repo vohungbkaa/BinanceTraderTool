@@ -51,6 +51,7 @@ mod smoke_tests {
                 oi_change_4h_pct: 5.0, price_change_4h_pct: 2.0,
                 funding_rate_avg: 0.01, liquidation_surge_detected: false,
                 spread_anomaly: false,
+                ..Default::default()
             },
             macro_events: MacroEvents {
                 next_event_name: "FOMC".to_string(),
