@@ -27,29 +27,54 @@ defineProps<{
       
       <!-- Order Flow Metrics -->
       <div v-if="microstructure" class="space-y-2">
-        <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg border border-gray-800">
-          <div class="flex items-center gap-2">
-            <Activity class="w-4 h-4 text-gray-500" />
-            <span class="text-xs text-gray-400 font-medium">CVD (Aggression)</span>
+        <div class="grid grid-cols-2 gap-2">
+          <div class="p-3 bg-black/20 rounded-lg border border-gray-800">
+            <div class="flex items-center gap-2 mb-1">
+              <Activity class="w-3 h-3 text-gray-500" />
+              <span class="text-[10px] text-gray-400 font-bold uppercase">CVD Delta 4H</span>
+            </div>
+            <div :class="microstructure.cvd_4h > 0 ? 'text-green-500' : 'text-red-500'" class="text-xs font-bold font-mono">
+              {{ microstructure.cvd_4h > 0 ? '+' : '' }}{{ formatNum(microstructure.cvd_4h) }}
+            </div>
           </div>
-          <span :class="microstructure.cvd > 0 ? 'text-green-500' : 'text-red-500'" class="text-xs font-bold font-mono">
-            {{ formatNum(microstructure.cvd) }}
-          </span>
+          
+          <div class="p-3 bg-black/20 rounded-lg border border-gray-800">
+            <div class="flex items-center gap-2 mb-1">
+              <Activity class="w-3 h-3 text-gray-500" />
+              <span class="text-[10px] text-gray-400 font-bold uppercase">CVD Delta 1D</span>
+            </div>
+            <div :class="microstructure.cvd_1d > 0 ? 'text-green-500' : 'text-red-500'" class="text-xs font-bold font-mono">
+              {{ microstructure.cvd_1d > 0 ? '+' : '' }}{{ formatNum(microstructure.cvd_1d) }}
+            </div>
+          </div>
         </div>
 
         <div class="p-3 bg-black/20 rounded-lg border border-gray-800 space-y-3">
-          <div class="flex items-center gap-2">
-            <Target class="w-4 h-4 text-gray-500" />
-            <span class="text-xs text-gray-400 font-medium">Liquidation Heatmap</span>
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <Target class="w-4 h-4 text-gray-500" />
+              <span class="text-xs text-gray-400 font-medium">Liquidation Heatmap</span>
+            </div>
+            <span class="text-[9px] text-gray-500 uppercase font-bold">Real / Est</span>
           </div>
-          <div class="flex justify-between items-center text-[10px]">
-            <span class="text-red-400 uppercase font-bold tracking-wider">Upper Cluster</span>
-            <span class="font-mono text-gray-300 font-bold">${{ formatNum(microstructure.liquidation_upper_cluster) }}</span>
+          
+          <div class="space-y-1">
+            <div class="flex justify-between items-center text-[10px]">
+              <span class="text-red-400 uppercase font-bold tracking-wider">Upper Cluster</span>
+              <div class="flex gap-2">
+                <span class="font-mono text-gray-500 font-medium">${{ formatNum(microstructure.liquidation_upper_real) }}</span>
+                <span class="font-mono text-gray-300 font-bold">${{ formatNum(microstructure.liquidation_upper_est) }}</span>
+              </div>
+            </div>
+            <div class="flex justify-between items-center text-[10px]">
+              <span class="text-green-400 uppercase font-bold tracking-wider">Lower Cluster</span>
+              <div class="flex gap-2">
+                <span class="font-mono text-gray-500 font-medium">${{ formatNum(microstructure.liquidation_lower_real) }}</span>
+                <span class="font-mono text-gray-300 font-bold">${{ formatNum(microstructure.liquidation_lower_est) }}</span>
+              </div>
+            </div>
           </div>
-          <div class="flex justify-between items-center text-[10px]">
-            <span class="text-green-400 uppercase font-bold tracking-wider">Lower Cluster</span>
-            <span class="font-mono text-gray-300 font-bold">${{ formatNum(microstructure.liquidation_lower_cluster) }}</span>
-          </div>
+          
           <div class="mt-2 pt-2 border-t border-gray-800/50 flex justify-between items-center text-[10px]">
              <span class="text-gray-500 uppercase font-bold tracking-wider">Cascade Risk</span>
              <span :class="microstructure.liquidation_surge_detected ? 'text-red-500' : 'text-green-500'" class="font-bold uppercase">

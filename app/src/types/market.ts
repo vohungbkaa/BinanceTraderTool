@@ -33,10 +33,13 @@ export interface Microstructure {
     oi_change_4h_pct: number;
     price_change_4h_pct: number;
     funding_rate_avg: number;
-    cvd: number;
+    cvd_4h: number;
+    cvd_1d: number;
     liquidation_surge_detected: boolean;
-    liquidation_upper_cluster: number;
-    liquidation_lower_cluster: number;
+    liquidation_upper_real: number;
+    liquidation_lower_real: number;
+    liquidation_upper_est: number;
+    liquidation_lower_est: number;
     spread_anomaly: boolean;
 }
 

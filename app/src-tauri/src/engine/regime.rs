@@ -258,25 +258,27 @@ impl MarketRegimeEngine {
             else { pos_score = 6; }
 
             if risk_data.microstructure.funding_rate_avg.abs() > 0.0005 { // 0.05%
-                pos_score = (pos_score - 20).max(0);
+                pos_score -= 5;
             }
 
-            // Flow Score (30)
+            // Flow Score (30) - Penalty for bearish breadth
+            let breadth_ema50 = risk_data.market_indices.market_breadth_pct_above_ema50;
+            let btc_d_down = risk_data.market_indices.btc_d_trend == crate::core::models::TrendDirection::Down;
+
             if structural_trend == StructuralTrend::MacroBullish {
-                if risk_data.market_indices.btc_d_trend == TrendDirection::Down && risk_data.market_indices.market_breadth_pct_above_ema50 > 50.0 {
-                    flow_score = 30;
-                } else if risk_data.market_indices.total3_btc_trend == TrendDirection::Up {
-                    flow_score = 20;
-                }
+                if breadth_ema50 > 50.0 { flow_score += 15; }
+                else if breadth_ema50 > 30.0 { flow_score += 5; }
+                if btc_d_down { flow_score += 15; }
             } else if structural_trend == StructuralTrend::MacroBearish {
-                if risk_data.market_indices.btc_d_trend == TrendDirection::Up && risk_data.market_indices.market_breadth_pct_above_ema50 < 40.0 {
-                    flow_score = 30; // Tiền rút khỏi Altcoin
-                } else if risk_data.market_indices.total3_btc_trend == TrendDirection::Down {
-                    flow_score = 20;
-                }
+                // Trong xu hướng Bearish, Breadth càng THẤP (ít coin nằm trên EMA50) thì xu hướng Bearish càng MẠNH (Được điểm cao cho vị thế Short)
+                if breadth_ema50 < 30.0 { flow_score += 15; }
+                else if breadth_ema50 < 50.0 { flow_score += 5; }
+                
+                // Nếu BTC Dominance tăng trong thị trường Bearish, Altcoin bị hút máu -> Thuận lợi cho Short Altcoin
+                if !btc_d_down { flow_score += 15; }
             }
 
-            market_score = trend_score + risk_score + pos_score + flow_score;
+            market_score = (trend_score + risk_score + pos_score.max(0) + flow_score).min(100);
         }
 
         // ---------------------------------------------------------

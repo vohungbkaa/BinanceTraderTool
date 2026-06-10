@@ -46,10 +46,13 @@ pub struct Microstructure {
     pub oi_change_4h_pct: f64,
     pub price_change_4h_pct: f64,
     pub funding_rate_avg: f64,
-    pub cvd: f64,
+    pub cvd_4h: f64,
+    pub cvd_1d: f64,
     pub liquidation_surge_detected: bool,
-    pub liquidation_upper_cluster: f64,
-    pub liquidation_lower_cluster: f64,
+    pub liquidation_upper_real: f64,
+    pub liquidation_lower_real: f64,
+    pub liquidation_upper_est: f64,
+    pub liquidation_lower_est: f64,
     pub spread_anomaly: bool,
 }
 

@@ -63,7 +63,13 @@ impl ScannerEngine {
 
     /// [TỐI ƯU CỰC ĐẠI] Lấy dữ liệu CHỈ TỪ DB (Closed Candles) kết hợp giá Live Ticker
     /// [TỐI ƯU CỰC ĐẠI] Lấy dữ liệu CHỈ TỪ DB (Closed Candles) kết hợp giá Live Ticker
-    pub async fn fetch_real_snapshots(&self, symbols: &[String], tickers_24h: &[serde_json::Value], db: std::sync::Arc<crate::core::db::Database>) -> Vec<AltcoinSnapshot> {
+    pub async fn fetch_real_snapshots(
+        &self, 
+        symbols: &[String], 
+        tickers_24h: &[serde_json::Value], 
+        db: std::sync::Arc<crate::core::db::Database>,
+        risk_manager: std::sync::Arc<tokio::sync::Mutex<crate::core::risk::RiskManager>>
+    ) -> Vec<AltcoinSnapshot> {
         info!("ScannerEngine: Calculating snapshots from DB & Live Tickers...");
         
         // Tạo HashMap để tra cứu nhanh ticker 24h
@@ -76,6 +82,20 @@ impl ScannerEngine {
             }
         }
 
+        // Đọc Funding và OI từ RiskManager
+        let risk = risk_manager.lock().await;
+        let mut risk_data_map = std::collections::HashMap::new();
+        for sym in symbols {
+            let fr = *risk.symbol_funding.get(sym).unwrap_or(&0.0);
+            let oi_curr = risk.symbol_oi.get(sym).copied();
+            let oi_prev = risk.symbol_oi_prev.get(sym).copied();
+            let oi_change = if let (Some(c), Some(p)) = (oi_curr, oi_prev) {
+                if p > 0.0 { (c - p) / p * 100.0 } else { 0.0 }
+            } else { 0.0 };
+            risk_data_map.insert(sym.clone(), (fr, oi_change));
+        }
+        drop(risk);
+
         let mut tasks = Vec::new();
         let config = crate::core::config::AppConfig::load();
         let alt_tf = config.altcoin_analysis_timeframe;
@@ -85,6 +105,7 @@ impl ScannerEngine {
             let db = db.clone();
             let live_data = ticker_map.get(&symbol).cloned();
             let alt_tf = alt_tf.clone();
+            let (funding_rate, oi_growth_4h_pct) = risk_data_map.get(&symbol).cloned().unwrap_or((0.0, 0.0));
 
             tasks.push(tokio::spawn(async move {
                 if let Some((live_price, change_1d_pct)) = live_data {
@@ -97,6 +118,8 @@ impl ScannerEngine {
                         symbol: symbol.clone(),
                         price: live_price,
                         change_1d_pct,
+                        funding_rate,
+                        oi_growth_4h_pct,
                         ..Default::default()
                     };
 
@@ -217,7 +240,14 @@ impl ScannerEngine {
             }
             
             let rating = Self::get_rating(final_rs);
-            let rank_score = (final_rs * 0.4) + (alt.vol_growth_4h_zscore * 0.3) + (alt.oi_growth_4h_pct * 0.3);
+            // Chỉnh lại rank_score để không bị chênh lệch scale giữa Z-Score và %
+            // Cap oi_growth ở mức 10% (tránh làm lệch rank)
+            let safe_oi = alt.oi_growth_4h_pct.clamp(-10.0, 10.0) / 10.0; // scale -1.0 to 1.0
+            
+            // Funding Penalty: Phạt nếu Funding ngược hướng (crowded)
+            let funding_skew = (alt.funding_rate * 100.0).clamp(-2.0, 2.0); // max 2% funding
+            
+            let mut rank_score = (final_rs * 0.5) + (alt.vol_growth_4h_zscore.clamp(-3.0, 3.0) * 0.3) + (safe_oi * 0.2);
 
             let mut is_valid = false;
             let mut direction = "";
@@ -227,16 +257,19 @@ impl ScannerEngine {
                 ActionMode::AggressiveLong => {
                     let price_above_ema = alt.price > alt.ema200_1d && alt.ema50_4h > alt.ema200_4h;
                     let good_rs = rating == RsRating::A || rating == RsRating::B;
-                    
-                    if good_rs && price_above_ema {
+                    let crowded_long = alt.funding_rate > 0.001; // > 0.1% là quá đông
+
+                    if good_rs && price_above_ema && !crowded_long {
                         is_valid = true;
                         direction = "LONG";
                         reason = "RS Leader, Trend Bullish";
+                        rank_score -= funding_skew; // Funding cao thì trừ điểm rank
                     }
                 },
                 ActionMode::ScalpLong => {
                     let good_rs = final_rs > 1.5; // Tập trung RS khung ngắn hạn
-                    if good_rs && alt.ema50_15m > alt.ema200_15m {
+                    let crowded_long = alt.funding_rate > 0.0015;
+                    if good_rs && alt.ema50_15m > alt.ema200_15m && !crowded_long {
                         is_valid = true;
                         direction = "LONG";
                         reason = "Strong short-term RS for Scalping (15m)";
@@ -246,17 +279,20 @@ impl ScannerEngine {
                     let price_below_ema = alt.price < alt.ema200_1d && alt.ema50_4h < alt.ema200_4h;
                     let weak_rs = rating == RsRating::D;
                     let pump_protection = alt.change_1d_pct > 5.0 || diffs_1d[i] > 5.0;
+                    let crowded_short = alt.funding_rate < -0.001; // < -0.1% là quá đông
 
-                    if weak_rs && price_below_ema && !pump_protection {
+                    if weak_rs && price_below_ema && !pump_protection && !crowded_short {
                         is_valid = true;
                         direction = "SHORT";
                         reason = "RS Laggard (D), Trend Bearish";
+                        rank_score += funding_skew; // Funding âm sâu thì trừ điểm rank (vì final_rs đang âm)
                     }
                 },
                 ActionMode::ScalpShort => {
                     let weak_rs = final_rs < -1.5;
                     let pump_protection = alt.change_1d_pct > 5.0 || diffs_1d[i] > 5.0;
-                    if weak_rs && alt.ema50_15m < alt.ema200_15m && !pump_protection {
+                    let crowded_short = alt.funding_rate < -0.0015;
+                    if weak_rs && alt.ema50_15m < alt.ema200_15m && !pump_protection && !crowded_short {
                         is_valid = true;
                         direction = "SHORT";
                         reason = "Weak short-term RS for Scalping (15m)";

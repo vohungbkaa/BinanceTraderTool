@@ -33,7 +33,22 @@ impl MetadataManager {
                 let symbol = t["symbol"].as_str()?.to_string();
                 let quote_volume = t["quoteVolume"].as_str()?.parse::<f64>().unwrap_or(0.0);
                 
-                if quote_volume >= 5_000_000.0 && !symbol.contains("USDC") && !symbol.contains("BUSD") {
+                if quote_volume >= 5_000_000.0 
+                    && symbol.ends_with("USDT")
+                    && !symbol.starts_with("USDC") 
+                    && !symbol.starts_with("BUSD")
+                    && !symbol.starts_with("TUSD")
+                    && !symbol.starts_with("FDUSD")
+                    && !symbol.starts_with("USDP")
+                    && !symbol.starts_with("USDE")
+                    && !symbol.starts_with("DAI")
+                    && !symbol.starts_with("EUR")
+                    && !symbol.starts_with("WBTC")
+                    && !symbol.starts_with("WETH")
+                    && symbol != "BTCUSDT" 
+                    && symbol != "ETHUSDT"
+                    && symbol != "BTCDOMUSDT"
+                    && symbol != "DEFIUSDT" {
                     Some((symbol, quote_volume))
                 } else {
                     None
@@ -44,10 +59,9 @@ impl MetadataManager {
         // 2. Sắp xếp theo Volume giảm dần
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-        // 3. Lấy Top N (Loại trừ BTC và ETH để tính toán Altcoin Breadth sạch)
+        // 3. Lấy Top N
         let top_n: Vec<String> = candidates.into_iter()
             .map(|(s, _)| s)
-            .filter(|s| s != "BTCUSDT" && s != "ETHUSDT")
             .take(limit)
             .collect();
 

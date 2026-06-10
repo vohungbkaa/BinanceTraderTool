@@ -112,7 +112,13 @@ impl DataPipeline {
                     // [SPEC 2.3] Cập nhật xu hướng TOTAL3 (Ước tính dựa trên Breadth)
                     let mut risk = risk_manager_for_total3.lock().await;
                     use crate::core::models::TrendDirection;
-                    risk.total3_trend = if breadth_ema50 > 50.0 { TrendDirection::Up } else { TrendDirection::Down };
+                    risk.total3_trend = if breadth_ema50 > 55.0 { 
+                        TrendDirection::Up 
+                    } else if breadth_ema50 < 45.0 { 
+                        TrendDirection::Down 
+                    } else { 
+                        TrendDirection::Sideway 
+                    };
                 }
             }
         });
@@ -161,7 +167,7 @@ impl DataPipeline {
                                         }
                                     };
 
-                                    let snapshots = self.scanner_engine.fetch_real_snapshots(&top_altcoins, &tickers_24h, self.db.clone()).await;
+                                    let snapshots = self.scanner_engine.fetch_real_snapshots(&top_altcoins, &tickers_24h, self.db.clone(), Arc::clone(&self.risk_manager)).await;
                                     
                                     // [FIX] Đồng bộ cách tính biến động BTCUSDT với Altcoin
                                     // 1D: Lấy từ tickers_24h (Rolling 24h) thay vì nến ngày chưa đóng
@@ -268,7 +274,21 @@ impl DataPipeline {
         }
 
         let mut breadth = self.breadth_engine.lock().await;
-        breadth.update_breadth(&top_alts).await?;
+        let _ = breadth.update_breadth(&top_alts).await;
+        let ema50_val = breadth.market_breadth_ema50;
+        
+        {
+            let mut risk = self.risk_manager.lock().await;
+            use crate::core::models::TrendDirection;
+            risk.total3_trend = if ema50_val > 55.0 {
+                TrendDirection::Up
+            } else if ema50_val < 45.0 {
+                TrendDirection::Down
+            } else {
+                TrendDirection::Sideway
+            };
+        }
+        
         Ok(())
     }
 
@@ -372,7 +392,8 @@ impl DataPipeline {
                     let mut risk = self.risk_manager.lock().await;
                     let breadth = self.breadth_engine.lock().await;
                     
-                    data.microstructure = risk.get_microstructure_risk(&data.candle.symbol);
+                    let atr = data.indicators.atr14.unwrap_or(data.candle.close * 0.02);
+                    data.microstructure = risk.get_microstructure_risk(&data.candle.symbol, data.candle.close, atr);
                     data.macro_events = risk.get_macro_events().await;
                     
                     if data.candle.timeframe == "4h" {
@@ -406,10 +427,15 @@ impl DataPipeline {
                     let mut engine = self.indicator_engine.lock().await;
                     
                     let cvd = data.candle.taker_buy_volume * 2.0 - data.candle.volume;
-                    risk.symbol_cvd.insert(data.candle.symbol.clone(), cvd);
+                    if data.candle.timeframe == "4h" {
+                        risk.symbol_cvd_4h.insert(data.candle.symbol.clone(), cvd);
+                    } else if data.candle.timeframe == "1d" {
+                        risk.symbol_cvd_1d.insert(data.candle.symbol.clone(), cvd);
+                    }
 
                     data.indicators = engine.process_unclosed(&data.candle);
-                    data.microstructure = risk.get_microstructure_risk(&data.candle.symbol);
+                    let atr = data.indicators.atr14.unwrap_or(data.candle.close * 0.02);
+                    data.microstructure = risk.get_microstructure_risk(&data.candle.symbol, data.candle.close, atr);
                     
                     let mut indices = risk.get_market_indices();
                     indices.market_breadth_pct_above_ema50 = breadth.market_breadth_ema50;
