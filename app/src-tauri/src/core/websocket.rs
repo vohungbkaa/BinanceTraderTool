@@ -181,7 +181,7 @@ impl BinanceWsClient {
                 let symbol = data["s"].as_str().unwrap_or("").to_string();
                 let oi = data["o"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                 let _ = self.event_tx.send(MarketEvent::DepthUpdated {
-                    symbol, spread_bps: 1.0, liquidity_score: oi, 
+                    symbol, is_liquidation: false, price: 0.0, value_usd: oi, 
                     timestamp: data["E"].as_i64().unwrap_or(0),
                 }).await;
             }
@@ -195,7 +195,7 @@ impl BinanceWsClient {
                                 let price = item["o"]["p"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                                 let _ = self.event_tx.send(MarketEvent::DepthUpdated {
                                     symbol: item["o"]["s"].as_str().unwrap_or("").to_string(),
-                                    spread_bps: 0.0, liquidity_score: amount * price,
+                                    is_liquidation: true, price, value_usd: amount * price,
                                     timestamp: item["E"].as_i64().unwrap_or(0),
                                 }).await;
                             },
@@ -234,6 +234,7 @@ impl BinanceWsClient {
             low: k["l"].as_str()?.parse().unwrap_or(0.0),
             close: k["c"].as_str()?.parse().unwrap_or(0.0),
             volume: k["v"].as_str()?.parse().unwrap_or(0.0),
+            taker_buy_volume: k["V"].as_str()?.parse().unwrap_or(0.0),
             is_closed: k["x"].as_bool().unwrap_or(false),
         };
 

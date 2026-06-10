@@ -70,6 +70,7 @@ impl BinanceRestClient {
                         low: candle_arr[3].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                         close: candle_arr[4].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                         volume: candle_arr[5].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                        taker_buy_volume: candle_arr[9].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                         is_closed: true,
                     };
                     candles.push(candle);
@@ -79,5 +80,13 @@ impl BinanceRestClient {
 
         info!("Successfully fetched {} klines for {}", candles.len(), symbol);
         Ok(candles)
+    }
+
+    /// Lấy thông tin Funding Rate hiện tại (Premium Index)
+    pub async fn fetch_premium_index(&self) -> Result<Vec<Value>> {
+        let url = format!("{}/fapi/v1/premiumIndex", self.base_url);
+        info!("Fetching Premium Index (Funding Rates)...");
+        let res = self.client.get(&url).send().await?.json::<Vec<Value>>().await?;
+        Ok(res)
     }
 }

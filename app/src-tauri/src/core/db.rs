@@ -178,6 +178,7 @@ impl Database {
                     low: r.get(6),
                     close: r.get(7),
                     volume: r.get(8),
+                    taker_buy_volume: 0.0,
                     is_closed: true,
                 },
                 indicators: crate::core::models::Indicators {
@@ -224,6 +225,7 @@ impl Database {
                 low: r.get(6),
                 close: r.get(7),
                 volume: r.get(8),
+                taker_buy_volume: 0.0,
                 is_closed: true,
             }
         }).collect();

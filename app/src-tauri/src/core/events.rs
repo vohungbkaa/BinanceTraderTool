@@ -18,8 +18,9 @@ pub enum MarketEvent {
 
     DepthUpdated {
         symbol: String,
-        spread_bps: f64,
-        liquidity_score: f64,
+        is_liquidation: bool,
+        price: f64,
+        value_usd: f64,
         timestamp: i64,
     },
     FundingUpdated {

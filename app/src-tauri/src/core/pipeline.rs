@@ -257,6 +257,16 @@ impl DataPipeline {
             ws.update_symbols(all_symbols);
         }
 
+        // Lấy Funding Rates ban đầu
+        if let Ok(premiums) = self.rest_client.fetch_premium_index().await {
+            let mut risk = self.risk_manager.lock().await;
+            for p in premiums {
+                let sym = p["symbol"].as_str().unwrap_or("").to_string();
+                let fr = p["lastFundingRate"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+                risk.symbol_funding.insert(sym, fr);
+            }
+        }
+
         let mut breadth = self.breadth_engine.lock().await;
         breadth.update_breadth(&top_alts).await?;
         Ok(())
@@ -391,9 +401,13 @@ impl DataPipeline {
 
             MarketEvent::CandleUpdated(mut data) => {
                 {
-                    let risk = self.risk_manager.lock().await;
+                    let mut risk = self.risk_manager.lock().await;
                     let breadth = self.breadth_engine.lock().await;
                     let mut engine = self.indicator_engine.lock().await;
+                    
+                    let cvd = data.candle.taker_buy_volume * 2.0 - data.candle.volume;
+                    risk.symbol_cvd.insert(data.candle.symbol.clone(), cvd);
+
                     data.indicators = engine.process_unclosed(&data.candle);
                     data.microstructure = risk.get_microstructure_risk(&data.candle.symbol);
                     
@@ -406,12 +420,22 @@ impl DataPipeline {
                 let _ = self.app_handle.emit("market-event", &MarketEvent::CandleUpdated(data.clone()));
                 let _ = self.global_event_tx.send(MarketEvent::CandleUpdated(data));
             }
-            MarketEvent::DepthUpdated { symbol, spread_bps, liquidity_score, timestamp: _ } => {
+            MarketEvent::DepthUpdated { symbol, is_liquidation, price, value_usd, timestamp: _ } => {
                 let mut risk = self.risk_manager.lock().await;
-                if spread_bps > 0.5 {
-                    risk.update_oi(symbol, liquidity_score);
+                if !is_liquidation {
+                    risk.update_oi(symbol, value_usd);
                 } else {
-                    risk.recent_liquidations_usd += liquidity_score;
+                    risk.recent_liquidations_usd += value_usd;
+                    // Tích lũy vào cluster dựa trên việc So sánh giá thanh lý với giá hiện tại (giả định dùng giá thanh lý làm mốc)
+                    // Đây là logic đơn giản: lấy giá thanh lý làm cluster
+                    if value_usd > 100_000.0 {
+                        let current_upper = *risk.symbol_liq_upper.get(&symbol).unwrap_or(&0.0);
+                        if current_upper == 0.0 || price > current_upper {
+                            risk.symbol_liq_upper.insert(symbol.clone(), price);
+                        } else {
+                            risk.symbol_liq_lower.insert(symbol.clone(), price);
+                        }
+                    }
                 }
             }
             MarketEvent::FundingUpdated { symbol, funding_rate, timestamp: _ } => {

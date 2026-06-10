@@ -25,6 +25,9 @@ pub struct RiskManager {
     pub symbol_oi: HashMap<String, f64>,
     pub symbol_oi_prev: HashMap<String, f64>,
     pub symbol_funding: HashMap<String, f64>,
+    pub symbol_cvd: HashMap<String, f64>,
+    pub symbol_liq_upper: HashMap<String, f64>,
+    pub symbol_liq_lower: HashMap<String, f64>,
     
     // [SPEC 2.3] TOTAL3 / BTC Approximation trend
     pub total3_trend: TrendDirection,
@@ -40,6 +43,9 @@ impl RiskManager {
             symbol_oi: HashMap::new(),
             symbol_oi_prev: HashMap::new(),
             symbol_funding: HashMap::new(),
+            symbol_cvd: HashMap::new(),
+            symbol_liq_upper: HashMap::new(),
+            symbol_liq_lower: HashMap::new(),
             total3_trend: TrendDirection::Sideway,
         }
     }
@@ -100,10 +106,12 @@ impl RiskManager {
         Microstructure {
             oi_change_4h_pct: oi_change,
             price_change_4h_pct: 0.0, // Sẽ được cập nhật từ Pipeline/Candle
-            funding_rate_avg: *self.symbol_funding.get(symbol).unwrap_or(&0.01),
+            funding_rate_avg: *self.symbol_funding.get(symbol).unwrap_or(&0.0),
+            cvd: *self.symbol_cvd.get(symbol).unwrap_or(&0.0),
             liquidation_surge_detected: self.recent_liquidations_usd > 10_000_000.0,
+            liquidation_upper_cluster: *self.symbol_liq_upper.get(symbol).unwrap_or(&0.0),
+            liquidation_lower_cluster: *self.symbol_liq_lower.get(symbol).unwrap_or(&0.0),
             spread_anomaly: false,
-            ..Default::default()
         }
     }
 
