@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { Brain, ShieldAlert, Zap, Search, Info } from '@lucide/vue';
+import { Brain, ShieldAlert, Zap, Activity, Info } from '@lucide/vue';
 import type { MarketRegimeContext } from '../../types/market';
-import { RiskStatus, ActionMode } from '../../types/market';
+import { RiskStatus, VolatilityRegime } from '../../types/market';
 
 defineProps<{
   regime: MarketRegimeContext;
@@ -9,14 +9,21 @@ defineProps<{
 
 defineEmits(['show-glossary']);
 
-const getScoreColor = (score: number) => {
-  if (score >= 75) return 'text-green-500';
-  if (score >= 40) return 'text-yellow-500';
+const getTrendColor = (score: number) => {
+  if (score >= 80) return 'text-blue-500';
+  if (score >= 40) return 'text-blue-400';
+  return 'text-gray-500';
+};
+
+const getFlowColor = (score: number) => {
+  if (score >= 80) return 'text-green-500';
+  if (score >= 50) return 'text-green-400';
   return 'text-red-500';
 };
 
-const getRiskColor = (status: RiskStatus) => {
-  if (status === RiskStatus.Normal) return 'text-green-500';
+const getVolatilityColor = (regime: VolatilityRegime) => {
+  if (regime === VolatilityRegime.Compression) return 'text-blue-400';
+  if (regime === VolatilityRegime.Expansion) return 'text-yellow-500';
   return 'text-red-500 animate-pulse';
 };
 </script>
@@ -49,20 +56,31 @@ const getRiskColor = (status: RiskStatus) => {
 
     <div class="grid grid-cols-12 gap-6 relative z-10">
       <!-- Market Score -->
-      <div class="col-span-12 md:col-span-4 flex flex-col items-center justify-center p-4 bg-black/20 rounded-xl border border-gray-800/50">
-        <span class="text-[10px] font-bold text-gray-500 uppercase mb-2">Composite Score</span>
-        <div :class="getScoreColor(regime.market_score)" class="text-5xl font-black font-mono">
-          {{ regime.market_score }}
+      <div class="col-span-12 md:col-span-5 grid grid-cols-2 gap-4">
+        <div class="flex flex-col items-center justify-center p-4 bg-black/20 rounded-xl border border-gray-800/50">
+          <span class="text-[10px] font-bold text-gray-500 uppercase mb-2">Trend Score</span>
+          <div :class="getTrendColor(regime.trend_score)" class="text-4xl font-black font-mono">
+            {{ regime.trend_score }}
+          </div>
+          <div class="w-full h-1 bg-gray-800 rounded-full mt-4 overflow-hidden">
+            <div class="h-full transition-all duration-1000 bg-blue-500" 
+                 :style="{ width: `${regime.trend_score}%` }"></div>
+          </div>
         </div>
-        <div class="w-full h-1.5 bg-gray-800 rounded-full mt-4 overflow-hidden">
-          <div class="h-full transition-all duration-1000" 
-               :class="regime.market_score >= 75 ? 'bg-green-500' : (regime.market_score >= 40 ? 'bg-yellow-500' : 'bg-red-500')"
-               :style="{ width: `${regime.market_score}%` }"></div>
+        <div class="flex flex-col items-center justify-center p-4 bg-black/20 rounded-xl border border-gray-800/50">
+          <span class="text-[10px] font-bold text-gray-500 uppercase mb-2">Flow Score</span>
+          <div :class="getFlowColor(regime.flow_score)" class="text-4xl font-black font-mono">
+            {{ regime.flow_score }}
+          </div>
+          <div class="w-full h-1 bg-gray-800 rounded-full mt-4 overflow-hidden">
+            <div class="h-full transition-all duration-1000 bg-green-500" 
+                 :style="{ width: `${regime.flow_score}%` }"></div>
+          </div>
         </div>
       </div>
 
       <!-- Analysis Details -->
-      <div class="col-span-12 md:col-span-8 grid grid-cols-2 gap-4">
+      <div class="col-span-12 md:col-span-7 grid grid-cols-2 gap-4">
         <div class="p-3 bg-black/20 rounded-lg border border-gray-800/30">
           <p class="text-[9px] font-bold text-gray-500 uppercase mb-1">Macro Trend (1D)</p>
           <p class="text-sm font-bold text-gray-200">{{ regime.structural_trend }}</p>
@@ -73,17 +91,15 @@ const getRiskColor = (status: RiskStatus) => {
         </div>
         <div class="p-3 bg-black/20 rounded-lg border border-gray-800/30">
           <p class="text-[9px] font-bold text-gray-500 uppercase mb-1 flex items-center gap-1">
-            <ShieldAlert class="w-2.5 h-2.5" /> Risk Status
+            <Activity class="w-2.5 h-2.5" /> Volatility
           </p>
-          <p class="text-sm font-bold" :class="getRiskColor(regime.risk_status)">{{ regime.risk_status }}</p>
+          <p class="text-sm font-bold" :class="getVolatilityColor(regime.volatility_regime)">{{ regime.volatility_regime }}</p>
         </div>
         <div class="p-3 bg-black/20 rounded-lg border border-gray-800/30">
           <p class="text-[9px] font-bold text-gray-500 uppercase mb-1 flex items-center gap-1">
-            <Search class="w-2.5 h-2.5" /> Altcoin Scan
+            <Zap class="w-2.5 h-2.5" /> OI State
           </p>
-          <p class="text-sm font-bold" :class="regime.allow_alt_scan ? 'text-green-500' : 'text-gray-400'">
-            {{ regime.allow_alt_scan ? 'READY TO SCAN' : 'WAITING...' }}
-          </p>
+          <p class="text-sm font-bold text-orange-400 uppercase italic">{{ regime.oi_state }}</p>
         </div>
       </div>
     </div>
@@ -91,10 +107,10 @@ const getRiskColor = (status: RiskStatus) => {
     <!-- Action Mode Banner -->
     <div class="mt-6 p-4 rounded-xl border flex items-center justify-between group transition-all"
          :class="{
-           'bg-green-500/10 border-green-500/30 text-green-500': regime.action_mode.includes('Long') || regime.action_mode === ActionMode.AggressiveLong,
-           'bg-red-500/10 border-red-500/30 text-red-500': regime.action_mode.includes('Short') || regime.action_mode === ActionMode.AggressiveShort,
-           'bg-yellow-500/10 border-yellow-500/30 text-yellow-500': regime.action_mode === ActionMode.MeanReversion || regime.action_mode === ActionMode.ScalpLong,
-           'bg-gray-500/10 border-gray-800 text-gray-500': regime.action_mode === ActionMode.OffSystem
+           'bg-green-500/10 border-green-500/30 text-green-500': (regime.action_mode || '').includes('Long'),
+           'bg-red-500/10 border-red-500/30 text-red-500': (regime.action_mode || '').includes('Short'),
+           'bg-yellow-500/10 border-yellow-500/30 text-yellow-500': regime.action_mode === 'Mean_Reversion',
+           'bg-gray-500/10 border-gray-800 text-gray-500': !regime.action_mode || regime.action_mode === 'Off_System'
          }">
       <div class="flex items-center gap-3">
         <Zap class="w-5 h-5 fill-current" />

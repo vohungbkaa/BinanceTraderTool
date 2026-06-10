@@ -26,7 +26,8 @@ impl std::fmt::Display for StructuralTrend {
 pub enum OperationalState {
     ActiveBullish,
     ActiveBearish,
-    Pullback,
+    BullishPullback,
+    BearishPullback,
     DynamicSideway,
 }
 
@@ -35,7 +36,8 @@ impl std::fmt::Display for OperationalState {
         let s = match self {
             Self::ActiveBullish => "Active_Bullish",
             Self::ActiveBearish => "Active_Bearish",
-            Self::Pullback => "Pullback",
+            Self::BullishPullback => "Bullish_Pullback",
+            Self::BearishPullback => "Bearish_Pullback",
             Self::DynamicSideway => "Dynamic_Sideway",
         };
         write!(f, "{}", s)
@@ -86,14 +88,60 @@ impl std::fmt::Display for ActionMode {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum VolatilityRegime {
+    Compression,
+    Expansion,
+    Extreme,
+}
+
+impl std::fmt::Display for VolatilityRegime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum OIState {
+    LongBuildUp,
+    ShortBuildUp,
+    LongLiquidation,
+    ShortCovering,
+    Neutral,
+}
+
+impl std::fmt::Display for OIState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::LongBuildUp => "Long Build-up",
+            Self::ShortBuildUp => "Short Build-up",
+            Self::LongLiquidation => "Long Liquidation",
+            Self::ShortCovering => "Short Covering",
+            Self::Neutral => "Neutral",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChecklistItem {
+    pub group: String,
+    pub label: String,
+    pub status: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketRegimeContext {
     pub structural_trend: StructuralTrend,
     pub operational_state: OperationalState,
+    pub volatility_regime: VolatilityRegime,
+    pub oi_state: OIState,
     pub risk_status: RiskStatus,
-    pub market_score: i32,
+    pub trend_score: i32,
+    pub flow_score: i32,
     pub allow_alt_scan: bool,
     pub action_mode: ActionMode,
+    pub checklist: Vec<ChecklistItem>,
 }
 
 pub struct MarketRegimeEngine {
@@ -171,16 +219,17 @@ impl MarketRegimeEngine {
     }
 
     async fn analyze(&self, current_data: &NormalizedCandleData) -> MarketRegimeContext {
-        // debug!("Phase 1: Analyzing Market Regime for {}...", current_data.candle.symbol);
-
         let mut risk_status = RiskStatus::Normal;
         let mut allow_alt_scan = false;
-        let mut market_score;
+        let mut trend_score = 0;
+        let mut flow_score = 0;
         let mut action_mode = ActionMode::OffSystem;
         let mut structural_trend = StructuralTrend::MacroNeutral;
-        let mut operational_state = OperationalState::Pullback;
+        let mut operational_state = OperationalState::DynamicSideway;
+        let mut volatility_regime = VolatilityRegime::Compression;
+        let mut oi_state = OIState::Neutral;
+        let mut checklist = Vec::new();
 
-        // Sử dụng dữ liệu vĩ mô và vi mô nếu đã cache, nếu chưa thì fallback dùng current_data (trong lúc warmup)
         let data_1d = self.latest_1d.as_ref().unwrap_or(current_data);
         let data_4h = self.latest_4h.as_ref().unwrap_or(current_data);
         let risk_data = current_data;
@@ -195,18 +244,35 @@ impl MarketRegimeEngine {
         } else if risk_data.atr_surge_ratio > 3.0 {
             risk_status = RiskStatus::VolatilityAlert;
         }
+        
+        checklist.push(ChecklistItem { 
+            group: "Risk Layer".to_string(), 
+            label: "No Event Block".to_string(), 
+            status: risk_status != RiskStatus::EventBlock 
+        });
+        checklist.push(ChecklistItem { 
+            group: "Risk Layer".to_string(), 
+            label: "Stability Normal".to_string(), 
+            status: risk_status == RiskStatus::Normal 
+        });
 
         // ---------------------------------------------------------
-        // BỘ LỌC 2: PHÂN TÍCH XU HƯỚNG ĐA TẦNG
+        // BỘ LỌC 2: PHÂN TÍCH XU HƯỚNG ĐA TẦNG (TREND LAYER)
         // ---------------------------------------------------------
         // Tầng Vĩ Mô (1D)
+        if let Some(ema50) = data_1d.indicators.ema50 {
+            let is_above = data_1d.candle.close > ema50;
+            checklist.push(ChecklistItem { group: "Macro Layer".to_string(), label: "BTC > EMA50 Daily".to_string(), status: is_above });
+        }
         if let Some(ema200) = data_1d.indicators.ema200 {
+            let is_above = data_1d.candle.close > ema200;
+            checklist.push(ChecklistItem { group: "Macro Layer".to_string(), label: "BTC > EMA200 Daily".to_string(), status: is_above });
+
             let is_hh_hl = data_1d.indicators.structure == "HH" || data_1d.indicators.structure == "HL";
-            let is_ll_lh = data_1d.indicators.structure == "LL" || data_1d.indicators.structure == "LH";
             
             if data_1d.candle.close > ema200 && data_1d.indicators.close_above_ema200_count >= 3 && is_hh_hl {
                 structural_trend = StructuralTrend::MacroBullish;
-            } else if data_1d.candle.close < ema200 && is_ll_lh {
+            } else if data_1d.candle.close < ema200 {
                 structural_trend = StructuralTrend::MacroBearish;
             }
         }
@@ -222,113 +288,161 @@ impl MarketRegimeEngine {
                 operational_state = OperationalState::ActiveBullish;
             } else if data_4h.candle.close < ema50 && ema50 < ema200 && is_ll_lh && minus_di > plus_di && adx > 25.0 {
                 operational_state = OperationalState::ActiveBearish;
-            } else if data_4h.range_24h_pct < data_4h.range_p40_90d && adx < 20.0 && data_4h.indicators.ema50_slope.abs() < 0.05 {
+            } else if data_4h.range_24h_pct < data_4h.range_p40_90d && adx < 20.0 {
                 operational_state = OperationalState::DynamicSideway;
-            }
-        }
-
-        // ---------------------------------------------------------
-        // BỘ LỌC 3: ĐÁNH GIÁ DÒNG TIỀN & ĐỘNG LƯỢNG (SCORING)
-        // ---------------------------------------------------------
-        if risk_status != RiskStatus::Normal {
-            market_score = 0;
-        } else {
-            let mut trend_score = 0;
-            let mut risk_score; // Max
-            let mut pos_score;
-            let mut flow_score = 0;
-
-            // Trend Score (30)
-            if structural_trend == StructuralTrend::MacroBullish && operational_state == OperationalState::ActiveBullish { trend_score = 30; }
-            else if structural_trend == StructuralTrend::MacroBearish && operational_state == OperationalState::ActiveBearish { trend_score = 30; }
-            else if operational_state == OperationalState::ActiveBullish || operational_state == OperationalState::ActiveBearish { trend_score = 15; }
-
-            // Risk Score (20)
-            let penalty = if risk_data.atr_surge_ratio > 3.0 { 20 } else { (risk_data.atr_surge_ratio * 5.0) as i32 };
-            risk_score = 20 - penalty.min(20).max(0);
-
-            // Positioning Score (20) - 4H OI
-            // Simple price change mock (since true price change tracking isn't fully in data_4h yet)
-            let price_up = data_4h.candle.close >= data_4h.candle.open;
-            let oi_up = risk_data.microstructure.oi_change_4h_pct > 0.0;
-            
-            if price_up && oi_up { pos_score = 18; }
-            else if !price_up && oi_up { pos_score = 16; }
-            else if price_up && !oi_up { pos_score = 8; }
-            else { pos_score = 6; }
-
-            if risk_data.microstructure.funding_rate_avg.abs() > 0.0005 { // 0.05%
-                pos_score -= 5;
-            }
-
-            // Flow Score (30) - Penalty for bearish breadth
-            let breadth_ema50 = risk_data.market_indices.market_breadth_pct_above_ema50;
-            let btc_d_down = risk_data.market_indices.btc_d_trend == crate::core::models::TrendDirection::Down;
-
-            if structural_trend == StructuralTrend::MacroBullish {
-                if breadth_ema50 > 50.0 { flow_score += 15; }
-                else if breadth_ema50 > 30.0 { flow_score += 5; }
-                if btc_d_down { flow_score += 15; }
-            } else if structural_trend == StructuralTrend::MacroBearish {
-                // Trong xu hướng Bearish, Breadth càng THẤP (ít coin nằm trên EMA50) thì xu hướng Bearish càng MẠNH (Được điểm cao cho vị thế Short)
-                if breadth_ema50 < 30.0 { flow_score += 15; }
-                else if breadth_ema50 < 50.0 { flow_score += 5; }
-                
-                // Nếu BTC Dominance tăng trong thị trường Bearish, Altcoin bị hút máu -> Thuận lợi cho Short Altcoin
-                if !btc_d_down { flow_score += 15; }
-            }
-
-            market_score = (trend_score + risk_score + pos_score.max(0) + flow_score).min(100);
-        }
-
-        // ---------------------------------------------------------
-        // BỘ LỌC 4: GATEWAY & ACTION MODE (KẾT LUẬN)
-        // ---------------------------------------------------------
-        let flow_alignment = match structural_trend {
-            StructuralTrend::MacroBullish => {
-                risk_data.market_indices.btc_d_trend == TrendDirection::Down || risk_data.market_indices.total3_btc_trend == TrendDirection::Up
-            },
-            StructuralTrend::MacroBearish => {
-                risk_data.market_indices.btc_d_trend == TrendDirection::Up || risk_data.market_indices.total3_btc_trend == TrendDirection::Down
-            },
-            StructuralTrend::MacroNeutral => false,
-        };
-
-        if risk_status == RiskStatus::Normal && market_score >= 40 {
-            if operational_state != OperationalState::DynamicSideway || market_score > 60 {
-                if flow_alignment {
-                    allow_alt_scan = true;
+            } else {
+                if structural_trend == StructuralTrend::MacroBullish {
+                    operational_state = OperationalState::BullishPullback;
+                } else {
+                    operational_state = OperationalState::BearishPullback;
                 }
             }
         }
 
-        if risk_status != RiskStatus::Normal || market_score < 40 {
-            action_mode = ActionMode::OffSystem;
-        } else if market_score > 75 && structural_trend == StructuralTrend::MacroBullish && operational_state == OperationalState::ActiveBullish && flow_alignment {
-            action_mode = ActionMode::AggressiveLong;
-        } else if market_score > 75 && structural_trend == StructuralTrend::MacroBearish && operational_state == OperationalState::ActiveBearish && flow_alignment {
-            action_mode = ActionMode::AggressiveShort;
-        } else if operational_state == OperationalState::DynamicSideway && risk_status == RiskStatus::Normal {
-            action_mode = ActionMode::MeanReversion;
-        } else if allow_alt_scan {
-            if structural_trend == StructuralTrend::MacroBullish {
-                action_mode = ActionMode::ScalpLong;
-            } else {
-                action_mode = ActionMode::ScalpShort;
+        // Volatility Regime
+        let is_expansion = if risk_data.atr_surge_ratio > 2.5 {
+            volatility_regime = VolatilityRegime::Extreme;
+            true
+        } else if risk_data.range_24h_pct > risk_data.range_p40_90d * 1.2 {
+            volatility_regime = VolatilityRegime::Expansion;
+            true
+        } else {
+            volatility_regime = VolatilityRegime::Compression;
+            false
+        };
+
+        checklist.push(ChecklistItem { 
+            group: "Risk Layer".to_string(), 
+            label: format!("Volatility: {}", volatility_regime), 
+            status: is_expansion 
+        });
+
+        // ---------------------------------------------------------
+        // BỘ LỌC 3: ĐÁNH GIÁ DÒNG TIỀN & ĐỘNG LƯỢNG (FLOW LAYER)
+        // ---------------------------------------------------------
+        let breadth_ema50 = risk_data.market_indices.market_breadth_pct_above_ema50;
+        let breadth_ema200 = risk_data.market_indices.market_breadth_pct_above_ema200;
+        
+        let breadth_bearish = breadth_ema50 < 40.0;
+        checklist.push(ChecklistItem { 
+            group: "Breadth Layer".to_string(), 
+            label: format!("Breadth EMA50 ({:.0}%) Low", breadth_ema50), 
+            status: breadth_bearish 
+        });
+
+        let btc_d_down = risk_data.market_indices.btc_d_trend == crate::core::models::TrendDirection::Down;
+        checklist.push(ChecklistItem { 
+            group: "Flow Layer".to_string(), 
+            label: "BTC Dominance Falling".to_string(), 
+            status: btc_d_down 
+        });
+
+        // OI State Logic
+        let price_change = (data_4h.candle.close - data_4h.candle.open) / data_4h.candle.open;
+        let oi_change = risk_data.microstructure.oi_change_4h_pct;
+        
+        if price_change > 0.005 && oi_change > 2.0 { oi_state = OIState::LongBuildUp; }
+        else if price_change < -0.005 && oi_change > 2.0 { oi_state = OIState::ShortBuildUp; }
+        else if price_change < -0.01 && oi_change < -2.0 { oi_state = OIState::LongLiquidation; }
+        else if price_change > 0.01 && oi_change < -2.0 { oi_state = OIState::ShortCovering; }
+        
+        checklist.push(ChecklistItem { 
+            group: "Flow Layer".to_string(), 
+            label: format!("OI State: {}", oi_state), 
+            status: oi_state != OIState::Neutral 
+        });
+
+        let cvd_1d = risk_data.microstructure.cvd_1d;
+        let cvd_4h = risk_data.microstructure.cvd_4h;
+        checklist.push(ChecklistItem { 
+            group: "Flow Layer".to_string(), 
+            label: "CVD 1D/4H Alignment".to_string(), 
+            status: (cvd_1d > 0.0 && cvd_4h > 0.0) || (cvd_1d < 0.0 && cvd_4h < 0.0) 
+        });
+
+        // ---------------------------------------------------------
+        // SCORING DECOUPLING
+        // ---------------------------------------------------------
+        // 1. TREND SCORE (0-100)
+        let mut t_score = 0;
+        if structural_trend == StructuralTrend::MacroBullish { t_score += 40; }
+        else if structural_trend == StructuralTrend::MacroBearish { t_score += 40; }
+        
+        if operational_state == OperationalState::ActiveBullish || operational_state == OperationalState::ActiveBearish { t_score += 40; }
+        else if operational_state == OperationalState::BullishPullback || operational_state == OperationalState::BearishPullback { t_score += 20; }
+        
+        if volatility_regime == VolatilityRegime::Expansion { t_score += 20; }
+        trend_score = t_score;
+
+        // 2. FLOW SCORE (0-100)
+        let mut f_score = 0;
+        // Breadth alignment
+        if structural_trend == StructuralTrend::MacroBullish && breadth_ema50 > 50.0 { f_score += 25; }
+        else if structural_trend == StructuralTrend::MacroBearish && breadth_ema50 < 40.0 { f_score += 25; }
+        
+        // BTC Dominance alignment
+        if structural_trend == StructuralTrend::MacroBullish && btc_d_down { f_score += 25; }
+        else if structural_trend == StructuralTrend::MacroBearish && !btc_d_down { f_score += 25; }
+        
+        // CVD & OI alignment
+        if (cvd_4h > 0.0 && oi_state == OIState::LongBuildUp) || (cvd_4h < 0.0 && oi_state == OIState::ShortBuildUp) { f_score += 50; }
+        else if (cvd_4h != 0.0) { f_score += 25; }
+        
+        flow_score = f_score;
+
+        if risk_status != RiskStatus::Normal {
+            trend_score = 0;
+            flow_score = 0;
+        }
+
+        // ---------------------------------------------------------
+        // ACTION MODE (GATEWAY)
+        // ---------------------------------------------------------
+        let flow_alignment = flow_score >= 50;
+        let trend_strong = trend_score >= 80;
+
+        if risk_status == RiskStatus::Normal && trend_score >= 40 {
+            if trend_strong && flow_alignment {
+                // [CRITICAL] Chỉ Aggressive khi có Volatility Expansion (Phá vỡ)
+                if is_expansion {
+                    if structural_trend == StructuralTrend::MacroBullish {
+                        action_mode = ActionMode::AggressiveLong;
+                    } else {
+                        action_mode = ActionMode::AggressiveShort;
+                    }
+                } else {
+                    // Nếu đang Compression, hạ cấp xuống Scalp để tránh bị trap/squeeze
+                    if structural_trend == StructuralTrend::MacroBullish {
+                        action_mode = ActionMode::ScalpLong;
+                    } else {
+                        action_mode = ActionMode::ScalpShort;
+                    }
+                }
+                allow_alt_scan = true;
+            } else if flow_alignment {
+                if structural_trend == StructuralTrend::MacroBullish {
+                    action_mode = ActionMode::ScalpLong;
+                } else {
+                    action_mode = ActionMode::ScalpShort;
+                }
+                allow_alt_scan = true;
+            } else if operational_state == OperationalState::DynamicSideway {
+                action_mode = ActionMode::MeanReversion;
             }
         }
 
-        let context = MarketRegimeContext {
+        MarketRegimeContext {
             structural_trend,
             operational_state,
+            volatility_regime,
+            oi_state,
             risk_status,
-            market_score,
+            trend_score,
+            flow_score,
             allow_alt_scan,
             action_mode,
-        };
-
-        // debug!("Phase 1: Analysis Complete. Score: {}, Bias: {}", context.market_score, context.action_mode);
-        context
+            checklist,
+        }
     }
 }
 

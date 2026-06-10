@@ -58,7 +58,10 @@ onMounted(() => {
           :microstructure="market.btcData['15m']?.microstructure || market.btcData['4h']?.microstructure || null"
         />
         
-        <LogStream :logs="market.logs" />
+        <LogStream 
+          :logs="market.logs" 
+          :checklist="market.regime.checklist"
+        />
       </div>
     </div>
 

@@ -3,7 +3,7 @@ import { ref } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import type { NormalizedCandleData, MarketIndices, MarketRegimeContext } from '../types/market';
-import { StructuralTrend, OperationalState, RiskStatus, ActionMode } from '../types/market';
+import { StructuralTrend, OperationalState, RiskStatus, ActionMode, VolatilityRegime, OIState } from '../types/market';
 import type { ScanCandidate } from '../types/scanner';
 
 export const useMarketStore = defineStore('market', () => {
@@ -17,11 +17,15 @@ export const useMarketStore = defineStore('market', () => {
     });
     const regime = ref<MarketRegimeContext>({
         structural_trend: StructuralTrend.MacroNeutral,
-        operational_state: OperationalState.Pullback,
+        operational_state: OperationalState.DynamicSideway,
+        volatility_regime: VolatilityRegime.Compression,
+        oi_state: OIState.Neutral,
         risk_status: RiskStatus.Normal,
-        market_score: 0,
+        trend_score: 0,
+        flow_score: 0,
         allow_alt_scan: false,
         action_mode: ActionMode.OffSystem,
+        checklist: [],
     });
     const shortlist = ref<ScanCandidate[]>([]);
     const lastScanTime = ref<number>(0);

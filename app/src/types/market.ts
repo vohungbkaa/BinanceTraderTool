@@ -68,33 +68,58 @@ export enum StructuralTrend {
 }
 
 export enum OperationalState {
-    ActiveBullish = "ActiveBullish",
-    ActiveBearish = "ActiveBearish",
-    Pullback = "Pullback",
-    DynamicSideway = "DynamicSideway",
+    ActiveBullish = "Active_Bullish",
+    ActiveBearish = "Active_Bearish",
+    BullishPullback = "Bullish_Pullback",
+    BearishPullback = "Bearish_Pullback",
+    DynamicSideway = "Dynamic_Sideway",
 }
 
 export enum RiskStatus {
     Normal = "Normal",
-    EventBlock = "EventBlock",
-    VolatilityAlert = "VolatilityAlert",
-    MicrostructureReset = "MicrostructureReset",
+    EventBlock = "Event_Block",
+    VolatilityAlert = "Volatility_Alert",
+    MicrostructureReset = "Microstructure_Reset",
 }
 
 export enum ActionMode {
-    AggressiveLong = "AggressiveLong",
-    AggressiveShort = "AggressiveShort",
-    ScalpLong = "ScalpLong",
-    ScalpShort = "ScalpShort",
-    MeanReversion = "MeanReversion",
-    OffSystem = "OffSystem",
+    AggressiveLong = "Aggressive_Long",
+    AggressiveShort = "Aggressive_Short",
+    ScalpLong = "Scalp_Long",
+    ScalpShort = "Scalp_Short",
+    MeanReversion = "Mean_Reversion",
+    OffSystem = "Off_System",
+}
+
+export enum VolatilityRegime {
+    Compression = "Compression",
+    Expansion = "Expansion",
+    Extreme = "Extreme",
+}
+
+export enum OIState {
+    LongBuildUp = "LongBuildUp",
+    ShortBuildUp = "ShortBuildUp",
+    LongLiquidation = "LongLiquidation",
+    ShortCovering = "ShortCovering",
+    Neutral = "Neutral",
+}
+
+export interface ChecklistItem {
+    group: string;
+    label: string;
+    status: boolean;
 }
 
 export interface MarketRegimeContext {
     structural_trend: StructuralTrend;
     operational_state: OperationalState;
+    volatility_regime: VolatilityRegime;
+    oi_state: OIState;
     risk_status: RiskStatus;
-    market_score: number;
+    trend_score: number;
+    flow_score: number;
     allow_alt_scan: boolean;
     action_mode: ActionMode;
+    checklist: ChecklistItem[];
 }
