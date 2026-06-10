@@ -62,7 +62,7 @@ impl DataPipeline {
             indicator_engine: indicator_engine.clone(),
             risk_manager: Arc::new(Mutex::new(RiskManager::new())),
             metadata_manager: MetadataManager::new(rest_client.clone()),
-            breadth_engine: Arc::new(Mutex::new(BreadthEngine::new(rest_client.clone(), db.clone()))),
+            breadth_engine: Arc::new(Mutex::new(BreadthEngine::new(rest_client.clone(), db.clone(), app_handle.clone()))),
             scanner_engine: ScannerEngine::new(rest_client, indicator_engine),
             symbols,
             app_handle,
@@ -250,8 +250,20 @@ impl DataPipeline {
     }
 
     async fn sync_metadata_and_breadth(&mut self) -> Result<()> {
+        let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+            step: "METADATA".to_string(),
+            progress: 10.0,
+            message: "Filtering top 100 high-quality altcoins...".to_string(),
+        });
+        
         let top_alts = self.metadata_manager.get_top_altcoins().await?;
         
+        let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+            step: "WEBSOCKET".to_string(),
+            progress: 30.0,
+            message: "Initializing live stream connections...".to_string(),
+        });
+
         // Cập nhật danh sách symbol cho Pipeline (bao gồm BTCUSDT + các Altcoin cấu hình)
         let mut all_symbols = vec!["BTCUSDT".to_string()];
         all_symbols.extend(top_alts.clone());
@@ -263,6 +275,12 @@ impl DataPipeline {
             ws.update_symbols(all_symbols);
         }
 
+        let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+            step: "FUNDING".to_string(),
+            progress: 50.0,
+            message: "Fetching initial funding rates and open interest...".to_string(),
+        });
+
         // Lấy Funding Rates ban đầu
         if let Ok(premiums) = self.rest_client.fetch_premium_index().await {
             let mut risk = self.risk_manager.lock().await;
@@ -272,6 +290,12 @@ impl DataPipeline {
                 risk.symbol_funding.insert(sym, fr);
             }
         }
+
+        let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+            step: "BREADTH".to_string(),
+            progress: 70.0,
+            message: "Calculating Market Breadth for top 100 altcoins...".to_string(),
+        });
 
         let mut breadth = self.breadth_engine.lock().await;
         let _ = breadth.update_breadth(&top_alts).await;
@@ -289,13 +313,27 @@ impl DataPipeline {
             };
         }
         
+        let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+            step: "BREADTH_DONE".to_string(),
+            progress: 100.0,
+            message: "Market Breadth sync complete.".to_string(),
+        });
+
         Ok(())
     }
 
     async fn perform_warmup(&mut self) -> Result<()> {
         info!("Performing intelligent warm-up (DB Cache First)...");
+        let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+            step: "WARMUP_START".to_string(),
+            progress: 0.0,
+            message: "Starting intelligent data warm-up...".to_string(),
+        });
+
         let timeframes = load_timeframes_from_config();
         let now_ms = chrono::Utc::now().timestamp_millis();
+        let total_steps = timeframes.len() * self.symbols.len();
+        let mut completed_steps = 0;
 
         for tf in &timeframes {
             let tf_str = tf.to_string();
@@ -361,12 +399,27 @@ impl DataPipeline {
                 // Đợi tất cả tasks trong lô chạy xong
                 for task in tasks {
                     let _ = task.await;
+                    completed_steps += 1;
+                    
+                    let progress = (completed_steps as f64 / total_steps as f64) * 100.0;
+                    let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+                        step: "WARMUP".to_string(),
+                        progress,
+                        message: format!("Warming up: {} steps/{}", completed_steps, total_steps),
+                    });
                 }
                 
                 // Sleep nhẹ để reset Rate Limit (rất an toàn cho Binance Futures)
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             }
         }
+
+        let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+            step: "WARMUP_DONE".to_string(),
+            progress: 100.0,
+            message: "All symbols warmed up and ready.".to_string(),
+        });
+
         Ok(())
     }
 

@@ -28,6 +28,11 @@ pub enum MarketEvent {
         funding_rate: f64,
         timestamp: i64,
     },
+    SyncProgress {
+        step: String,
+        progress: f64,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

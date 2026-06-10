@@ -9,6 +9,7 @@ import RiskMonitor from './components/dashboard/RiskMonitor.vue';
 import LogStream from './components/dashboard/LogStream.vue';
 import AltcoinScanner from './components/dashboard/AltcoinScanner.vue';
 import GlossaryModal from './components/common/GlossaryModal.vue';
+import InitialSyncOverlay from './components/common/InitialSyncOverlay.vue';
 
 const market = useMarketStore();
 const isGlossaryOpen = ref(false);
@@ -64,6 +65,8 @@ onMounted(() => {
         />
       </div>
     </div>
+
+    <InitialSyncOverlay :sync="market.syncProgress" />
 
     <!-- Modals -->
     <GlossaryModal 

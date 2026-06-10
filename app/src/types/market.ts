@@ -123,3 +123,9 @@ export interface MarketRegimeContext {
     action_mode: ActionMode;
     checklist: ChecklistItem[];
 }
+
+export interface SyncProgress {
+    step: string;
+    progress: number;
+    message: string;
+}

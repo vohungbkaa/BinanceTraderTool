@@ -5,18 +5,24 @@ use tracing::{info, warn};
 use crate::core::indicators::SymbolIndicatorState;
 use std::sync::Arc;
 
+use tauri::AppHandle;
+use tauri::Emitter;
+use crate::core::events::MarketEvent;
+
 pub struct BreadthEngine {
     rest_client: BinanceRestClient,
     db: Arc<Database>,
+    app_handle: AppHandle,
     pub market_breadth_ema50: f64,
     pub market_breadth_ema200: f64,
 }
 
 impl BreadthEngine {
-    pub fn new(rest_client: BinanceRestClient, db: Arc<Database>) -> Self {
+    pub fn new(rest_client: BinanceRestClient, db: Arc<Database>, app_handle: AppHandle) -> Self {
         Self {
             rest_client,
             db,
+            app_handle,
             market_breadth_ema50: 0.0,
             market_breadth_ema200: 0.0,
         }
@@ -36,10 +42,13 @@ impl BreadthEngine {
         if total == 0 { return Ok(()); }
 
         let mut results = Vec::new();
+        let mut completed_symbols = 0;
+
         // Chia thành từng nhóm 5 symbols để tải song song
         for chunk in top_altcoins.chunks(5) {
             let mut tasks = Vec::new();
             for symbol in chunk {
+                // ... task setup remains same ...
                 let symbol = symbol.clone();
                 let db = self.db.clone();
                 let rest_client = self.rest_client.clone();
@@ -55,7 +64,6 @@ impl BreadthEngine {
                     let candles = if is_fresh && has_enough {
                         candles_in_db
                     } else {
-                        info!("BreadthEngine: Cache stale or incomplete for {}. Fetching from Binance...", symbol);
                         match rest_client.fetch_klines(&symbol, &tf_clone, 200).await {
                             Ok(data) => {
                                 let mut state = SymbolIndicatorState::new();
@@ -92,6 +100,13 @@ impl BreadthEngine {
                 if let Ok(res) = task.await {
                     results.push(res);
                 }
+                completed_symbols += 1;
+                let progress = 60.0 + (completed_symbols as f64 / total as f64) * 30.0; // 60% -> 90%
+                let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+                    step: "BREADTH".to_string(),
+                    progress,
+                    message: format!("Calculating Breadth: {}/{} symbols", completed_symbols, total),
+                });
             }
             // Sleep 500ms giữa các nhóm để nhả Rate Limit (rất an toàn)
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;

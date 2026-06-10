@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import type { NormalizedCandleData, MarketIndices, MarketRegimeContext } from '../types/market';
+import type { NormalizedCandleData, MarketIndices, MarketRegimeContext, SyncProgress } from '../types/market';
 import { StructuralTrend, OperationalState, RiskStatus, ActionMode, VolatilityRegime, OIState } from '../types/market';
 import type { ScanCandidate } from '../types/scanner';
 
@@ -30,6 +30,11 @@ export const useMarketStore = defineStore('market', () => {
     const shortlist = ref<ScanCandidate[]>([]);
     const lastScanTime = ref<number>(0);
     const logs = ref<string[]>([]);
+    const syncProgress = ref<SyncProgress | null>({
+        step: 'START',
+        progress: 0,
+        message: 'System engine starting...'
+    });
 
     async function init() {
         // Fetch config from backend
@@ -43,6 +48,17 @@ export const useMarketStore = defineStore('market', () => {
 
         await listen<any>('market-event', (event) => {
             const eventType = event.payload.event_type;
+
+            if (eventType === 'SyncProgress') {
+                syncProgress.value = event.payload.payload as SyncProgress;
+                if (syncProgress.value.step === 'WARMUP_DONE') {
+                    // Tự động đóng loading sau 1s khi hoàn tất
+                    setTimeout(() => {
+                        syncProgress.value = null;
+                    }, 1500);
+                }
+                return;
+            }
 
             if (eventType === 'RegimeUpdated') {
                 regime.value = event.payload.payload as MarketRegimeContext;
@@ -75,5 +91,5 @@ export const useMarketStore = defineStore('market', () => {
         });
     }
 
-    return { btcData, timeframes, marketIndices, regime, shortlist, lastScanTime, logs, init };
+    return { btcData, timeframes, marketIndices, regime, shortlist, lastScanTime, logs, syncProgress, init };
 });
