@@ -1,0 +1,139 @@
+--- app/src-tauri/src/core/metadata.rs
++++ app/src-tauri/src/core/metadata.rs
+@@ -4,6 +4,8 @@
+ use std::collections::{HashSet, HashMap};
+ use serde::{Deserialize, Serialize};
+ use std::cmp::Ordering;
++use std::sync::Arc;
++use tokio::sync::RwLock;
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct UniverseCandidate {
+@@ -25,13 +27,15 @@
+ 
+ pub struct MetadataManager {
+     rest_client: BinanceRestClient,
++    atr_cache: Arc<RwLock<HashMap<String, (f64, i64)>>>,
+ }
+ 
+ impl MetadataManager {
+     pub fn new(rest_client: BinanceRestClient) -> Self {
+         Self {
+             rest_client,
++            atr_cache: Arc::new(RwLock::new(HashMap::new())),
+         }
+     }
+ 
+@@ -53,6 +57,8 @@
+         
+         const FUNDING_SAFE_THRESH: f64 = 0.0005;  // 0.05%
+         const FUNDING_RISK_THRESH: f64 = 0.0015;  // 0.15%
++        
++        const ATR_CACHE_TTL_MS: i64 = 4 * 60 * 60 * 1000; // Cache 4 giờ
+ 
+         // 1. Lọc Metadata từ Exchange Info (Chỉ lấy PERPETUAL & TRADING)
+         let exchange_info = self.rest_client.fetch_exchange_info().await?;
+@@ -124,31 +130,49 @@
+         // 5. Fetch Open Interest (Parallel bulk fetch for the broader universe)
+         let oi_map = self.rest_client.fetch_open_interest_bulk(&top_symbols).await?;
+ 
+-        // 6. Fetch Historical Klines (Parallel) to calculate True ATR (14 periods of 1D)
+-        // We fetch 15 candles to calculate True Range properly (needs previous close)
+-        info!("Fetching historical 1D klines for True ATR calculation...");
+-        let klines_map = self.rest_client.fetch_klines_bulk(&top_symbols, "1d", 15).await?;
+-        
++        // 6. Caching cho ATR 14D
++        let now = chrono::Utc::now().timestamp_millis();
++        let mut symbols_to_fetch_atr = Vec::new();
+         let mut atr_map = HashMap::new();
+-        for (sym, candles) in klines_map {
+-            if candles.len() < 14 {
+-                atr_map.insert(sym, 0.0); // Not enough data
+-                continue;
++
++        {
++            let cache = self.atr_cache.read().await;
++            for sym in &top_symbols {
++                if let Some((atr_val, ts)) = cache.get(sym) {
++                    if now - ts < ATR_CACHE_TTL_MS {
++                        atr_map.insert(sym.clone(), *atr_val);
++                        continue;
++                    }
++                }
++                symbols_to_fetch_atr.push(sym.clone());
+             }
+-            
+-            let mut tr_sum = 0.0;
+-            let mut valid_tr_count = 0;
+-            
+-            for i in 1..candles.len() {
+-                let current = &candles[i];
+-                let prev = &candles[i - 1];
+-                
+-                let h_l = current.high - current.low;
+-                let h_pc = (current.high - prev.close).abs();
+-                let l_pc = (current.low - prev.close).abs();
+-                
+-                let tr = h_l.max(h_pc).max(l_pc);
+-                
+-                // Cần chuẩn hóa True Range thành % (ATR Percentage) so với giá Close hiện tại để so sánh giữa các coin
+-                if current.close > 0.0 {
+-                    tr_sum += tr / current.close;
+-                    valid_tr_count += 1;
+-                }
+-            }
+-            
+-            let atr_pct = if valid_tr_count > 0 { tr_sum / valid_tr_count as f64 } else { 0.0 };
+-            atr_map.insert(sym, atr_pct);
++        }
++
++        if !symbols_to_fetch_atr.is_empty() {
++            info!("Fetching historical 1D klines for {} symbols to update ATR cache...", symbols_to_fetch_atr.len());
++            if let Ok(klines_map) = self.rest_client.fetch_klines_bulk(&symbols_to_fetch_atr, "1d", 15).await {
++                let mut cache_write = self.atr_cache.write().await;
++                for (sym, candles) in klines_map {
++                    if candles.len() < 14 {
++                        cache_write.insert(sym.clone(), (-1.0, now));
++                        atr_map.insert(sym, -1.0); // Coin mới niêm yết
++                        continue;
++                    }
++                    
++                    let mut tr_sum = 0.0;
++                    let mut valid_tr_count = 0;
++                    
++                    for i in 1..candles.len() {
++                        let current = &candles[i];
++                        let prev = &candles[i - 1];
++                        
++                        let h_l = current.high - current.low;
++                        let h_pc = (current.high - prev.close).abs();
++                        let l_pc = (current.low - prev.close).abs();
++                        
++                        let tr = h_l.max(h_pc).max(l_pc);
++                        
++                        if current.close > 0.0 {
++                            tr_sum += tr / current.close;
++                            valid_tr_count += 1;
++                        }
++                    }
++                    
++                    let atr_pct = if valid_tr_count > 0 { tr_sum / valid_tr_count as f64 } else { 0.0 };
++                    cache_write.insert(sym.clone(), (atr_pct, now));
++                    atr_map.insert(sym, atr_pct);
++                }
++            }
+         }
+ 
+         // 7. Merge Data & Filter Top 150 by OI (Tránh Wash Trading)
+         let mut candidates: Vec<UniverseCandidate> = raw_candidates.into_iter().map(|r| {
+             let oi_nominal = *oi_map.get(&r.symbol).unwrap_or(&0.0);
+             
+             // [QUAN TRỌNG] Quy đổi OI ra USDT để phản ánh đúng dòng tiền Dollar-value
+             let open_interest = oi_nominal * r.last_price;
+             
+             let funding_rate_abs = *funding_map.get(&r.symbol).unwrap_or(&0.0);
+-            let volatility = *atr_map.get(&r.symbol).unwrap_or(&0.0); // True ATR%
++            let volatility = *atr_map.get(&r.symbol).unwrap_or(&-1.0); // Default -1.0 cho an toàn
+             
+             UniverseCandidate {
+                 symbol: r.symbol,

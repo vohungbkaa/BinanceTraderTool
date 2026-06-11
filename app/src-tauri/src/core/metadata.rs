@@ -55,13 +55,12 @@ impl MetadataManager {
         const INITIAL_UNIVERSE_LIMIT: usize = 300;
         const OI_FILTER_LIMIT: usize = 150;
         
-        const ATR_LOW_THRESH: f64 = 0.02;     // 2%
-        const ATR_SWEET_MIN: f64 = 0.02;      // 2%
+        const ATR_SWEET_MIN: f64 = 0.02;      // 2% - Mức tối thiểu của vùng lý tưởng
         const ATR_SWEET_MAX: f64 = 0.08;      // 8%
         const ATR_HIGH_THRESH: f64 = 0.15;    // 15%
         
-        const FUNDING_SAFE_THRESH: f64 = 0.0001;  // 0.01%
-        const FUNDING_RISK_THRESH: f64 = 0.0003;  // 0.03%
+        const FUNDING_SAFE_THRESH: f64 = 0.0005;  // 0.05%
+        const FUNDING_RISK_THRESH: f64 = 0.0015;  // 0.15%
 
         // 1. Lọc Metadata từ Exchange Info (Chỉ lấy PERPETUAL & TRADING)
         let exchange_info = self.rest_client.fetch_exchange_info().await?;
@@ -140,7 +139,7 @@ impl MetadataManager {
         let mut atr_map = HashMap::new();
         for (sym, candles) in klines_map {
             if candles.len() < 14 {
-                atr_map.insert(sym, 0.0); // Not enough data
+                atr_map.insert(sym, -1.0); // Not enough data -> Neutral flag
                 continue;
             }
             
@@ -176,7 +175,7 @@ impl MetadataManager {
             let open_interest = oi_nominal * r.last_price;
             
             let funding_rate_abs = *funding_map.get(&r.symbol).unwrap_or(&0.0);
-            let volatility = *atr_map.get(&r.symbol).unwrap_or(&0.0); // True ATR%
+            let volatility = *atr_map.get(&r.symbol).unwrap_or(&-1.0); // True ATR%, default -1.0 cho an toàn (Neutral score)
             
             UniverseCandidate {
                 symbol: r.symbol,
@@ -221,8 +220,10 @@ impl MetadataManager {
             
             // B. ATR Sweet Spot Logic (20%)
             let v = c.volatility;
-            c.atr_score = if v < ATR_LOW_THRESH {
-                (v / ATR_LOW_THRESH) * 100.0
+            c.atr_score = if v < 0.0 {
+                50.0 // Coin mới niêm yết chưa đủ data -> Điểm trung tính 50
+            } else if v < ATR_SWEET_MIN {
+                (v / ATR_SWEET_MIN) * 100.0
             } else if v <= ATR_SWEET_MAX {
                 100.0
             } else if v <= ATR_HIGH_THRESH {
