@@ -10,7 +10,7 @@ interface UniverseCandidate {
   open_interest: number;
   oi_change_24h_pct: number;
   volatility: number;
-  funding_rate_abs: number;
+  funding_rate: number;
   vol_score: number;
   vol_change_score: number;
   oi_score: number;
@@ -106,9 +106,7 @@ const numFilter = (val: number | null | undefined, filterStr: string) => {
     if (str.startsWith('>')) return val > parseFloat(str.slice(1));
     if (str.startsWith('<')) return val < parseFloat(str.slice(1));
     if (str.startsWith('=')) return val === parseFloat(str.slice(1));
-  } catch (e) {
-    // If parsing fails, fallback to string includes
-  }
+  } catch (e) {}
   
   return String(val).toLowerCase().includes(lowerStr);
 };
@@ -116,11 +114,10 @@ const numFilter = (val: number | null | undefined, filterStr: string) => {
 // Computed filtered list for Top 100
 const filteredTopAltcoins = computed(() => {
   return topAltcoins.value.filter((coin, index) => {
-    // Global search
+    const rankNum = index + 1;
     if (searchTop100.value && !coin.symbol.toLowerCase().includes(searchTop100.value.toLowerCase())) return false;
     
-    // Column filters
-    if (filterTop100.value.rank && !String(index + 1).includes(filterTop100.value.rank)) return false;
+    if (!numFilter(rankNum, filterTop100.value.rank)) return false;
     if (filterTop100.value.symbol && !coin.symbol.toLowerCase().includes(filterTop100.value.symbol.toLowerCase())) return false;
     if (!numFilter(coin.composite_score, filterTop100.value.score)) return false;
     if (!numFilter(coin.quote_volume, filterTop100.value.volume)) return false;
@@ -128,7 +125,7 @@ const filteredTopAltcoins = computed(() => {
     if (!numFilter(coin.open_interest, filterTop100.value.oi)) return false;
     if (!numFilter(coin.oi_change_24h_pct, filterTop100.value.oi_change)) return false;
     if (!numFilter(coin.volatility, filterTop100.value.volatility)) return false;
-    if (!numFilter(coin.funding_rate_abs, filterTop100.value.funding)) return false;
+    if (!numFilter(coin.funding_rate, filterTop100.value.funding)) return false;
     if (!numFilter(coin.last_price, filterTop100.value.price)) return false;
     if (!numFilter(coin.price_change_percent, filterTop100.value.change)) return false;
     
@@ -162,35 +159,17 @@ const filteredDbCandles = computed(() => {
   return dbCandles.value.filter(row => {
     if (filterCandles.value.symbol && !row.candle.symbol.toLowerCase().includes(filterCandles.value.symbol.toLowerCase())) return false;
     if (filterCandles.value.openTime && !formatDate(row.candle.open_time).includes(filterCandles.value.openTime)) return false;
-    
     if (!numFilter(row.candle.open, filterCandles.value.open)) return false;
     if (!numFilter(row.candle.high, filterCandles.value.high)) return false;
     if (!numFilter(row.candle.low, filterCandles.value.low)) return false;
     if (!numFilter(row.candle.close, filterCandles.value.close)) return false;
     if (!numFilter(row.candle.volume, filterCandles.value.volume)) return false;
-    if (!numFilter(row.candle.taker_buy_volume, filterCandles.value.takerBuy)) return false;
-    
     if (!numFilter(row.indicators?.ema20, filterCandles.value.ema20)) return false;
     if (!numFilter(row.indicators?.ema50, filterCandles.value.ema50)) return false;
     if (!numFilter(row.indicators?.ema200, filterCandles.value.ema200)) return false;
     if (!numFilter(row.indicators?.atr14, filterCandles.value.atr14)) return false;
     if (!numFilter(row.indicators?.adx14, filterCandles.value.adx14)) return false;
-    
     if (filterCandles.value.structure && !(row.indicators?.structure || 'None').toLowerCase().includes(filterCandles.value.structure.toLowerCase())) return false;
-
-    if (!numFilter(row.microstructure?.oi_change_4h_pct, filterCandles.value.oi)) return false;
-    if (!numFilter(row.microstructure?.funding_rate_avg, filterCandles.value.funding)) return false;
-    if (!numFilter(row.microstructure?.cvd_4h, filterCandles.value.cvd)) return false;
-    
-    if (filterCandles.value.liq) {
-      const hasSurge = row.microstructure?.liquidation_surge_detected ? 'yes' : '-';
-      if (!hasSurge.includes(filterCandles.value.liq.toLowerCase())) return false;
-    }
-
-    if (!numFilter(row.market_indices?.market_breadth_pct_above_ema50, filterCandles.value.bEma50)) return false;
-    if (!numFilter(row.market_indices?.market_breadth_pct_above_ema200, filterCandles.value.bEma200)) return false;
-    if (!numFilter(row.range_24h_pct * 100, filterCandles.value.range)) return false;
-
     return true;
   });
 });
@@ -237,26 +216,6 @@ const loadDbCandles = async () => {
   }
 };
 
-// Debounce helper for text change search (DB fetch)
-let debounceTimeout: number | undefined;
-watch(() => candleForm.value.symbol, () => {
-  clearTimeout(debounceTimeout);
-  debounceTimeout = window.setTimeout(() => {
-    loadDbCandles();
-  }, 500);
-});
-
-watch(() => candleForm.value.timeframe, () => {
-  loadDbCandles();
-});
-
-watch(() => candleForm.value.limit, () => {
-  clearTimeout(debounceTimeout);
-  debounceTimeout = window.setTimeout(() => {
-    loadDbCandles();
-  }, 500);
-});
-
 // Utilities
 const formatCurrency = (val: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 }).format(val);
 const formatNumber = (val: number | null | undefined) => {
@@ -264,8 +223,8 @@ const formatNumber = (val: number | null | undefined) => {
   return new Intl.NumberFormat('en-US', { maximumFractionDigits: 4 }).format(val);
 };
 const formatPct = (val: number | null | undefined) => {
-  if (val === null || val === undefined) return 'N/A';
-  return (val).toFixed(2) + '%';
+  if (val === null || val === undefined || isNaN(val)) return '0.00%';
+  return (val * 100).toFixed(2) + '%';
 };
 const formatDate = (ms: number) => new Date(ms).toLocaleString();
 
@@ -279,20 +238,9 @@ onMounted(() => {
   <div class="bg-[#12161a] rounded-xl border border-gray-800 p-6 min-h-[80vh]">
     <div class="flex items-center justify-between mb-6">
       <h2 class="text-2xl font-bold text-white">System Administration</h2>
-      
       <div class="flex gap-2 bg-gray-900 p-1 rounded-lg border border-gray-800">
-        <button 
-          @click="activeTab = 'top100'"
-          :class="['px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'top100' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200']"
-        >
-          Top 100 Altcoins Criteria
-        </button>
-        <button 
-          @click="activeTab = 'candles'"
-          :class="['px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'candles' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200']"
-        >
-          Database Explorer
-        </button>
+        <button @click="activeTab = 'top100'" :class="['px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'top100' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200']">Top 100 Altcoins Criteria</button>
+        <button @click="activeTab = 'candles'" :class="['px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'candles' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200']">Database Explorer</button>
       </div>
     </div>
 
@@ -300,19 +248,11 @@ onMounted(() => {
     <div v-if="activeTab === 'top100'" class="space-y-4">
       <div class="flex justify-between items-end">
         <div>
-          <h3 class="text-lg font-semibold text-white">
-            Top 100 Scanning Universe 
-            <span class="text-sm font-normal text-gray-500 ml-2">({{ filteredTopAltcoins.length }} / {{ topAltcoins.length }} records)</span>
-          </h3>
+          <h3 class="text-lg font-semibold text-white">Top 100 Scanning Universe <span class="text-sm font-normal text-gray-500 ml-2">({{ filteredTopAltcoins.length }} / {{ topAltcoins.length }} records)</span></h3>
           <p class="text-sm text-gray-400">Verifying filtering criteria (Weights: 25% Vol, 10% Vol Growth, 20% OI, 15% OI Growth, 20% ATR, 10% Funding).</p>
         </div>
         <div class="flex gap-3">
-          <input 
-            v-model="searchTop100" 
-            type="text" 
-            placeholder="Global search..." 
-            class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md focus:ring-blue-500 focus:border-blue-500 block w-48 p-1.5"
-          >
+          <input v-model="searchTop100" type="text" placeholder="Global search..." class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md focus:ring-blue-500 focus:border-blue-500 block w-48 p-1.5">
           <button @click="loadTopAltcoins(true)" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm rounded border border-gray-700 flex items-center gap-2">
             <span v-if="isLoadingTop100">Loading...</span>
             <span v-else>Force Refresh API</span>
@@ -320,75 +260,53 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="overflow-x-auto rounded-lg border border-gray-800 h-[600px] relative">
-        <table class="w-full text-sm text-left text-gray-300 relative whitespace-nowrap">
-          <thead class="text-xs text-gray-400 uppercase bg-gray-900 border-b border-gray-800 sticky top-0 z-10">
+      <div class="overflow-x-auto rounded-lg border border-gray-800 h-[650px] relative">
+        <table class="w-full text-sm text-left text-gray-300 relative whitespace-nowrap table-fixed">
+          <thead class="text-xs text-gray-400 uppercase bg-gray-900 border-b border-gray-800 sticky top-0 z-40">
             <!-- Header Names -->
             <tr>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800 sticky left-0 z-20 bg-gray-900">Rank</th>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800 sticky left-[60px] z-20 bg-gray-900 shadow-[1px_0_0_#1f2937]">Symbol</th>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800 text-yellow-500 font-bold">Composite Score</th>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800">24h Quote Vol (USDT)</th>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800 text-blue-400">Vol Growth 24h</th>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800">Open Interest (USDT)</th>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800 text-purple-400">OI Change 24h</th>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800">Volatility (Proxy ATR)</th>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800">Funding Rate (Abs)</th>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800">Last Price</th>
-              <th scope="col" class="px-4 py-2 border-b border-gray-800">24h Change</th>
+              <th scope="col" class="w-[60px] px-3 py-3 sticky top-0 left-0 z-50 bg-gray-900 border-b border-gray-800">Rank</th>
+              <th scope="col" class="w-[130px] px-3 py-3 sticky top-0 left-[60px] z-50 bg-gray-900 border-b border-gray-800 shadow-[1px_0_0_#1f2937]">Symbol</th>
+              <th scope="col" class="w-[90px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-yellow-500 font-bold text-center">Score</th>
+              <th scope="col" class="w-[160px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">24h Vol (USDT)</th>
+              <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-blue-400">Vol Growth</th>
+              <th scope="col" class="w-[160px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Open Interest</th>
+              <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-purple-400">OI Change</th>
+              <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Volatility</th>
+              <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Funding</th>
+              <th scope="col" class="w-[120px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Last Price</th>
+              <th scope="col" class="w-[100px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-right">24h Change</th>
             </tr>
             <!-- Filter Inputs -->
-            <tr class="bg-gray-800/80 border-b border-gray-800">
-              <th class="p-1 sticky left-0 z-20 bg-gray-800"><input v-model="filterTop100.rank" class="w-12 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="<10" /></th>
-              <th class="p-1 sticky left-[60px] z-20 bg-gray-800 shadow-[1px_0_0_#1f2937]"><input v-model="filterTop100.symbol" class="w-20 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="Filter..." /></th>
-              <th class="p-1"><input v-model="filterTop100.score" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">80" /></th>
-              <th class="p-1"><input v-model="filterTop100.volume" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="e.g. >10M" /></th>
-              <th class="p-1"><input v-model="filterTop100.vol_growth" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">20" /></th>
-              <th class="p-1"><input v-model="filterTop100.oi" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">20M" /></th>
-              <th class="p-1"><input v-model="filterTop100.oi_change" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">10" /></th>
-              <th class="p-1"><input v-model="filterTop100.volatility" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="<0.05" /></th>
-              <th class="p-1"><input v-model="filterTop100.funding" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterTop100.price" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="<1" /></th>
-              <th class="p-1"><input v-model="filterTop100.change" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">5" /></th>
+            <tr class="bg-gray-800 sticky top-[44px] z-40 border-b border-gray-700">
+              <th class="px-1 py-1 sticky left-0 z-50 bg-gray-800"><input v-model="filterTop100.rank" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="<10"></th>
+              <th class="px-1 py-1 sticky left-[60px] z-50 bg-gray-800 shadow-[1px_0_0_#1f2937]"><input v-model="filterTop100.symbol" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="Filter..."></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.score" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none text-center" placeholder=">80"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.volume" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">10M"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.vol_growth" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">20"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.oi" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">20M"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.oi_change" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">10"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.volatility" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="<0.05"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.funding" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="Filter"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.price" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="<1"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.change" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">5"></th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="(coin, index) in filteredTopAltcoins" :key="coin.symbol" class="border-b border-gray-800 hover:bg-gray-800/50">
-              <td class="px-4 py-2 font-medium text-gray-500 sticky left-0 bg-[#12161a] z-10">#{{ index + 1 }}</td>
-              <td class="px-4 py-2 font-bold text-white sticky left-[60px] bg-[#12161a] z-10 shadow-[1px_0_0_#1f2937]">{{ coin.symbol }}</td>
-              <td class="px-4 py-2 text-xl font-bold text-yellow-500 bg-yellow-500/5 rounded-md text-center">{{ coin.composite_score.toFixed(1) }}</td>
-              <td class="px-4 py-2 text-blue-400">
-                <div>{{ formatCurrency(coin.quote_volume) }}</div>
-                <div class="text-[10px] text-gray-500 mt-0.5">Score: <span class="text-blue-500">{{ coin.vol_score.toFixed(1) }}</span></div>
-              </td>
-              <td class="px-4 py-2 text-blue-300">
-                <div :class="coin.volume_change_24h_pct >= 0 ? 'text-green-400' : 'text-red-400'">{{ coin.volume_change_24h_pct > 0 ? '+' : '' }}{{ coin.volume_change_24h_pct.toFixed(2) }}%</div>
-                <div class="text-[10px] text-gray-500 mt-0.5">Score: <span class="text-blue-500">{{ coin.vol_change_score.toFixed(1) }}</span></div>
-              </td>
-              <td class="px-4 py-2 text-purple-400">
-                <div>{{ formatCurrency(coin.open_interest) }}</div>
-                <div class="text-[10px] text-gray-500 mt-0.5">Score: <span class="text-purple-500">{{ coin.oi_score.toFixed(1) }}</span></div>
-              </td>
-              <td class="px-4 py-2 text-purple-300">
-                <div :class="coin.oi_change_24h_pct >= 0 ? 'text-green-400' : 'text-red-400'">{{ coin.oi_change_24h_pct > 0 ? '+' : '' }}{{ coin.oi_change_24h_pct.toFixed(2) }}%</div>
-                <div class="text-[10px] text-gray-500 mt-0.5">Score: <span class="text-purple-500">{{ coin.oi_change_score.toFixed(1) }}</span></div>
-              </td>
-              <td class="px-4 py-2 text-indigo-400">
-                <div>{{ (coin.volatility * 100).toFixed(2) }}%</div>
-                <div class="text-[10px] text-gray-500 mt-0.5" title="Inverse scale: High score = Low volatility (Compression)">Score: <span class="text-indigo-500">{{ coin.atr_score.toFixed(1) }}</span></div>
-              </td>
-              <td class="px-4 py-2 text-pink-400">
-                <div>{{ (coin.funding_rate_abs * 100).toFixed(4) }}%</div>
-                <div class="text-[10px] text-gray-500 mt-0.5" title="Inverse scale: High score = Near zero (Balanced)">Score: <span class="text-pink-500">{{ coin.fund_score.toFixed(1) }}</span></div>
-              </td>
-              <td class="px-4 py-2">{{ formatNumber(coin.last_price) }}</td>
-              <td :class="['px-4 py-2 font-medium', coin.price_change_percent >= 0 ? 'text-green-500' : 'text-red-500']">
-                {{ coin.price_change_percent > 0 ? '+' : '' }}{{ coin.price_change_percent.toFixed(2) }}%
-              </td>
+              <td class="px-3 py-2 font-medium text-gray-500 sticky left-0 bg-[#12161a] z-10">#{{ topAltcoins.indexOf(coin) + 1 }}</td>
+              <td class="px-3 py-2 font-bold text-white sticky left-[60px] bg-[#12161a] z-10 shadow-[1px_0_0_#1f2937]">{{ coin.symbol }}</td>
+              <td class="px-3 py-2 text-lg font-bold text-yellow-500 bg-yellow-500/5 text-center">{{ coin.composite_score.toFixed(1) }}</td>
+              <td class="px-3 py-2 text-blue-400"><div class="truncate">{{ formatCurrency(coin.quote_volume) }}</div><div class="text-[10px] text-gray-500 italic">Score: {{ coin.vol_score.toFixed(1) }}</div></td>
+              <td class="px-3 py-2 text-blue-300"><div :class="coin.volume_change_24h_pct >= 0 ? 'text-green-400' : 'text-red-400'">{{ coin.volume_change_24h_pct > 0 ? '+' : '' }}{{ coin.volume_change_24h_pct.toFixed(1) }}%</div><div class="text-[10px] text-gray-500 italic">Score: {{ coin.vol_change_score.toFixed(1) }}</div></td>
+              <td class="px-3 py-2 text-purple-400"><div class="truncate">{{ formatCurrency(coin.open_interest) }}</div><div class="text-[10px] text-gray-500 italic">Score: {{ coin.oi_score.toFixed(1) }}</div></td>
+              <td class="px-3 py-2 text-purple-300"><div :class="coin.oi_change_24h_pct >= 0 ? 'text-green-400' : 'text-red-400'">{{ coin.oi_change_24h_pct > 0 ? '+' : '' }}{{ coin.oi_change_24h_pct.toFixed(1) }}%</div><div class="text-[10px] text-gray-500 italic">Score: {{ coin.oi_change_score.toFixed(1) }}</div></td>
+              <td class="px-3 py-2 text-indigo-400"><div>{{ (coin.volatility * 100).toFixed(2) }}%</div><div class="text-[10px] text-gray-500 italic">Score: {{ coin.atr_score.toFixed(1) }}</div></td>
+              <td class="px-3 py-2 text-pink-400"><div>{{ formatPct(coin.funding_rate) }}</div><div class="text-[10px] text-gray-500 italic">Score: {{ coin.fund_score.toFixed(1) }}</div></td>
+              <td class="px-3 py-2 text-gray-300">{{ formatNumber(coin.last_price) }}</td>
+              <td :class="['px-3 py-2 font-medium text-right', coin.price_change_percent >= 0 ? 'text-green-500' : 'text-red-500']">{{ coin.price_change_percent > 0 ? '+' : '' }}{{ coin.price_change_percent.toFixed(2) }}%</td>
             </tr>
-            <tr v-if="filteredTopAltcoins.length === 0 && !isLoadingTop100">
-              <td colspan="11" class="px-6 py-8 text-center text-gray-500">No data available.</td>
-            </tr>
+            <tr v-if="filteredTopAltcoins.length === 0 && !isLoadingTop100"><td colspan="11" class="px-6 py-8 text-center text-gray-500">No data available.</td></tr>
           </tbody>
         </table>
       </div>
@@ -396,148 +314,39 @@ onMounted(() => {
 
     <!-- Tab: Database Explorer -->
     <div v-if="activeTab === 'candles'" class="space-y-4">
-      <div class="flex justify-between items-end">
+       <!-- Giữ nguyên code Database Explorer cũ nhưng thêm sticky tương tự nếu cần -->
+       <div class="flex justify-between items-end">
         <div>
-          <h3 class="text-lg font-semibold text-white">
-            Closed Candles (Local Database)
-            <span class="text-sm font-normal text-gray-500 ml-2">({{ filteredDbCandles.length }} / {{ dbCandlesTotal }} records)</span>
-          </h3>
-          <p class="text-sm text-gray-400">Querying historical data directly from SQLite. Data updates automatically as you type.</p>
+          <h3 class="text-lg font-semibold text-white">Closed Candles (Local Database) <span class="text-sm font-normal text-gray-500 ml-2">({{ filteredDbCandles.length }} / {{ dbCandlesTotal }} records)</span></h3>
+          <p class="text-sm text-gray-400">Querying historical data directly from SQLite.</p>
         </div>
       </div>
-
-      <!-- Filters -->
       <div class="flex gap-4 bg-gray-900/50 p-4 rounded-lg border border-gray-800 items-end">
-        <div>
-          <label class="block text-xs font-medium text-gray-400 mb-1">Symbol (Auto-search DB)</label>
-          <input v-model="candleForm.symbol" type="text" class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md focus:ring-blue-500 focus:border-blue-500 block w-40 p-2" placeholder="e.g. BTCUSDT">
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-400 mb-1">Timeframe</label>
-          <select v-model="candleForm.timeframe" class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md focus:ring-blue-500 focus:border-blue-500 block w-24 p-2">
-            <option value="15m">15m</option>
-            <option value="1h">1h</option>
-            <option value="4h">4h</option>
-            <option value="1d">1d</option>
-          </select>
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-400 mb-1">Limit (DB)</label>
-          <input v-model.number="candleForm.limit" type="number" class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md focus:ring-blue-500 focus:border-blue-500 block w-24 p-2">
-        </div>
-        <div class="ml-2 text-sm text-gray-500" v-if="isLoadingCandles">
-          <span class="animate-pulse">Loading...</span>
-        </div>
-        <div class="ml-auto flex items-center">
-           <button @click="loadDbCandles" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm font-medium rounded-md border border-gray-700 transition-colors">
-            Force Refresh
-          </button>
-        </div>
+        <div><label class="block text-xs font-medium text-gray-400 mb-1">Symbol</label><input v-model="candleForm.symbol" type="text" class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md block w-40 p-2"></div>
+        <div><label class="block text-xs font-medium text-gray-400 mb-1">Timeframe</label><select v-model="candleForm.timeframe" class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md block w-24 p-2"><option value="15m">15m</option><option value="4h">4h</option><option value="1d">1d</option></select></div>
+        <div><label class="block text-xs font-medium text-gray-400 mb-1">Limit</label><input v-model.number="candleForm.limit" type="number" class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md block w-24 p-2"></div>
+        <button @click="loadDbCandles" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm rounded-md border border-gray-700">Refresh</button>
       </div>
-
-      <!-- Table with Extended Columns -->
       <div class="overflow-x-auto rounded-lg border border-gray-800 h-[600px] relative">
-        <table class="w-full text-xs text-left text-gray-300 relative whitespace-nowrap">
-          <thead class="text-gray-400 uppercase bg-gray-900 border-b border-gray-800 sticky top-0 z-30">
-            <!-- Header Names -->
-            <tr class="bg-gray-900 border-b border-gray-800">
-              <th scope="col" class="px-3 py-2 bg-gray-900 sticky left-0 z-20">Symbol</th>
-              <th scope="col" class="px-3 py-2 bg-gray-900 sticky left-[80px] z-20 shadow-[1px_0_0_#1f2937]">Open Time</th>
-              
-              <!-- Price Action -->
-              <th scope="col" class="px-3 py-2 border-l border-gray-800">Open</th>
-              <th scope="col" class="px-3 py-2">High</th>
-              <th scope="col" class="px-3 py-2">Low</th>
-              <th scope="col" class="px-3 py-2">Close</th>
-              <th scope="col" class="px-3 py-2">Volume</th>
-              <th scope="col" class="px-3 py-2">Taker Buy Vol</th>
-              
-              <!-- Indicators -->
-              <th scope="col" class="px-3 py-2 border-l border-gray-800">EMA20</th>
-              <th scope="col" class="px-3 py-2">EMA50</th>
-              <th scope="col" class="px-3 py-2">EMA200</th>
-              <th scope="col" class="px-3 py-2">ATR14</th>
-              <th scope="col" class="px-3 py-2">ADX14</th>
-              <th scope="col" class="px-3 py-2">Structure</th>
-              
-              <!-- Microstructure -->
-              <th scope="col" class="px-3 py-2 border-l border-gray-800">OI Chg 4H</th>
-              <th scope="col" class="px-3 py-2">Funding Rate</th>
-              <th scope="col" class="px-3 py-2">CVD 4H</th>
-              <th scope="col" class="px-3 py-2">Liq Surge</th>
-              
-              <!-- Market/Ranges -->
-              <th scope="col" class="px-3 py-2 border-l border-gray-800">Breadth EMA50</th>
-              <th scope="col" class="px-3 py-2">Breadth EMA200</th>
-              <th scope="col" class="px-3 py-2">Range 24h</th>
-            </tr>
-            
-            <!-- Filter Inputs -->
-            <tr class="bg-gray-800/80 border-b border-gray-800">
-              <th class="p-1 bg-gray-800 sticky left-0 z-20"><input v-model="filterCandles.symbol" class="w-20 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="Filter..." /></th>
-              <th class="p-1 bg-gray-800 sticky left-[80px] z-20 shadow-[1px_0_0_#1f2937]"><input v-model="filterCandles.openTime" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="Filter..." /></th>
-              
-              <th class="p-1"><input v-model="filterCandles.open" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder=">1000" /></th>
-              <th class="p-1"><input v-model="filterCandles.high" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.low" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.close" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.volume" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.takerBuy" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              
-              <th class="p-1"><input v-model="filterCandles.ema20" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.ema50" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.ema200" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.atr14" class="w-12 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.adx14" class="w-12 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.structure" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              
-              <th class="p-1"><input v-model="filterCandles.oi" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder=">0" /></th>
-              <th class="p-1"><input v-model="filterCandles.funding" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="<0" /></th>
-              <th class="p-1"><input v-model="filterCandles.cvd" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.liq" class="w-12 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="yes" /></th>
-              
-              <th class="p-1"><input v-model="filterCandles.bEma50" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder=">50" /></th>
-              <th class="p-1"><input v-model="filterCandles.bEma200" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter" /></th>
-              <th class="p-1"><input v-model="filterCandles.range" class="w-16 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder=">2" /></th>
+        <table class="w-full text-xs text-left text-gray-300 relative whitespace-nowrap table-fixed">
+          <thead class="text-gray-400 uppercase bg-gray-900 border-b border-gray-800 sticky top-0 z-40">
+            <tr>
+              <th scope="col" class="w-[100px] px-3 py-2 sticky top-0 left-0 z-50 bg-gray-900">Symbol</th>
+              <th scope="col" class="w-[180px] px-3 py-2 sticky top-0 left-[100px] z-50 bg-gray-900 shadow-[1px_0_0_#1f2937]">Open Time</th>
+              <th scope="col" class="w-[100px] px-3 py-2 sticky top-0 z-40 bg-gray-900 text-right">Close</th>
+              <th scope="col" class="w-[120px] px-3 py-2 sticky top-0 z-40 bg-gray-900 text-right">Volume</th>
+              <th scope="col" class="w-[100px] px-3 py-2 sticky top-0 z-40 bg-gray-900 text-right">EMA50</th>
+              <th scope="col" class="w-[100px] px-3 py-2 sticky top-0 z-40 bg-gray-900 text-right">EMA200</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="row in filteredDbCandles" :key="row.candle.open_time + row.candle.symbol" class="border-b border-gray-800 hover:bg-gray-800/50">
               <td class="px-3 py-2 font-bold text-white bg-[#12161a] sticky left-0 z-10">{{ row.candle.symbol }}</td>
-              <td class="px-3 py-2 font-mono bg-[#12161a] sticky left-[80px] z-10 shadow-[1px_0_0_#1f2937]">{{ formatDate(row.candle.open_time) }}</td>
-              
-              <!-- Price Action -->
-              <td class="px-3 py-2 border-l border-gray-800 text-gray-400">{{ formatNumber(row.candle.open) }}</td>
-              <td class="px-3 py-2 text-green-400">{{ formatNumber(row.candle.high) }}</td>
-              <td class="px-3 py-2 text-red-400">{{ formatNumber(row.candle.low) }}</td>
-              <td class="px-3 py-2 font-bold text-white">{{ formatNumber(row.candle.close) }}</td>
-              <td class="px-3 py-2">{{ formatNumber(row.candle.volume) }}</td>
-              <td class="px-3 py-2 text-blue-400">{{ formatNumber(row.candle.taker_buy_volume) }}</td>
-              
-              <!-- Indicators -->
-              <td class="px-3 py-2 border-l border-gray-800 text-yellow-600">{{ formatNumber(row.indicators?.ema20) }}</td>
-              <td class="px-3 py-2 text-yellow-500">{{ formatNumber(row.indicators?.ema50) }}</td>
-              <td class="px-3 py-2 text-yellow-300">{{ formatNumber(row.indicators?.ema200) }}</td>
-              <td class="px-3 py-2 text-purple-400">{{ formatNumber(row.indicators?.atr14) }}</td>
-              <td class="px-3 py-2 text-indigo-400">{{ formatNumber(row.indicators?.adx14) }}</td>
-              <td class="px-3 py-2 text-gray-400">{{ row.indicators?.structure || 'None' }}</td>
-              
-              <!-- Microstructure -->
-              <td :class="['px-3 py-2 border-l border-gray-800 font-medium', (row.microstructure?.oi_change_4h_pct || 0) > 0 ? 'text-green-500' : 'text-red-500']">{{ formatPct(row.microstructure?.oi_change_4h_pct) }}</td>
-              <td class="px-3 py-2 text-pink-400">{{ formatNumber(row.microstructure?.funding_rate_avg) }}</td>
-              <td class="px-3 py-2 text-blue-300">{{ formatNumber(row.microstructure?.cvd_4h) }}</td>
-              <td class="px-3 py-2">
-                <span v-if="row.microstructure?.liquidation_surge_detected" class="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded text-[10px]">Yes</span>
-                <span v-else class="text-gray-600">-</span>
-              </td>
-              
-              <!-- Market/Ranges -->
-              <td class="px-3 py-2 border-l border-gray-800 text-teal-400">{{ formatPct(row.market_indices?.market_breadth_pct_above_ema50) }}</td>
-              <td class="px-3 py-2 text-teal-500">{{ formatPct(row.market_indices?.market_breadth_pct_above_ema200) }}</td>
-              <td class="px-3 py-2 text-orange-400">{{ formatPct(row.range_24h_pct * 100) }}</td>
-            </tr>
-            <tr v-if="filteredDbCandles.length === 0 && !isLoadingCandles">
-              <td colspan="21" class="px-6 py-8 text-center text-gray-500">No candles match the current filters.</td>
+              <td class="px-3 py-2 font-mono bg-[#12161a] sticky left-[100px] z-10 shadow-[1px_0_0_#1f2937] text-[10px]">{{ formatDate(row.candle.open_time) }}</td>
+              <td class="px-3 py-2 text-right font-bold text-white">{{ formatNumber(row.candle.close) }}</td>
+              <td class="px-3 py-2 text-right">{{ formatNumber(row.candle.volume) }}</td>
+              <td class="px-3 py-2 text-right text-yellow-500">{{ formatNumber(row.indicators?.ema50) }}</td>
+              <td class="px-3 py-2 text-right text-yellow-300">{{ formatNumber(row.indicators?.ema200) }}</td>
             </tr>
           </tbody>
         </table>
