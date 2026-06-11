@@ -1,0 +1,15 @@
+--- app/src-tauri/src/core/metadata.rs
++++ app/src-tauri/src/core/metadata.rs
+@@ -10,10 +10,12 @@
+     pub symbol: String,
+     pub quote_volume: f64,
+     pub open_interest: f64,
++    pub oi_change_24h_pct: f64,
+     pub volatility: f64,
+     pub funding_rate_abs: f64,
+     
+     pub vol_score: f64,
+     pub oi_score: f64,
++    pub oi_change_score: f64,
+     pub atr_score: f64,
+     pub fund_score: f64,

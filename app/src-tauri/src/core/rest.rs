@@ -70,6 +70,7 @@ impl BinanceRestClient {
                         low: candle_arr[3].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                         close: candle_arr[4].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                         volume: candle_arr[5].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                        quote_volume: candle_arr[7].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                         taker_buy_volume: candle_arr[9].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                         is_closed: true,
                     };
@@ -117,6 +118,49 @@ impl BinanceRestClient {
                     Ok(val) => {
                         let oi = val["openInterest"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                         Some((sym, oi))
+                    }
+                    Err(_) => None,
+                }
+            }));
+        }
+
+        let mut results = std::collections::HashMap::new();
+        for task in futures_util::future::join_all(tasks).await {
+            if let Ok(Some((sym, oi))) = task {
+                results.insert(sym, oi);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Lấy Open Interest 24h trước cho nhiều symbols đồng thời
+    pub async fn fetch_oi_hist_24h_bulk(&self, symbols: &[String]) -> Result<std::collections::HashMap<String, f64>> {
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let semaphore = Arc::new(Semaphore::new(10)); // Giới hạn 10 requests concurrent để tránh rate limit
+        let mut tasks = Vec::new();
+        let end_time = chrono::Utc::now().timestamp_millis() - 24 * 60 * 60 * 1000;
+
+        for symbol in symbols {
+            let sym = symbol.clone();
+            let client = self.clone();
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            
+            tasks.push(tokio::spawn(async move {
+                let _permit = permit;
+                let url = format!("{}/futures/data/openInterestHist?symbol={}&period=5m&limit=1&endTime={}", client.base_url, sym, end_time);
+                
+                match client.client.get(&url).send().await {
+                    Ok(res) => {
+                        if let Ok(data) = res.json::<Vec<Value>>().await {
+                            if let Some(first) = data.first() {
+                                let oi = first["sumOpenInterest"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                                return Some((sym, oi));
+                            }
+                        }
+                        None
                     }
                     Err(_) => None,
                 }

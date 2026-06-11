@@ -1,0 +1,87 @@
+--- app/src-tauri/src/core/metadata.rs
++++ app/src-tauri/src/core/metadata.rs
+@@ -124,40 +124,53 @@
+         // 5. Fetch Open Interest (Parallel bulk fetch for the broader universe)
+         let oi_map = self.rest_client.fetch_open_interest_bulk(&top_symbols).await?;
+ 
+-        // 6. Fetch Historical Klines (Parallel) to calculate True ATR (14 periods of 1D)
+-        // We fetch 15 candles to calculate True Range properly (needs previous close)
+-        info!("Fetching historical 1D klines for True ATR calculation...");
+-        let klines_map = self.rest_client.fetch_klines_bulk(&top_symbols, "1d", 15).await?;
++        // 6. Caching & Fetching cho ATR 14D
++        let now = chrono::Utc::now().timestamp_millis();
++        let mut symbols_to_fetch_atr = Vec::new();
+         
+         let mut atr_map = HashMap::new();
+-        for (sym, candles) in klines_map {
+-            if candles.len() < 14 {
+-                atr_map.insert(sym, -1.0); // Not enough data -> Neutral flag
+-                continue;
++
++        {
++            let cache = self.atr_cache.read().await;
++            for sym in &top_symbols {
++                if let Some((atr_val, ts)) = cache.get(sym) {
++                    if now - ts < ATR_CACHE_TTL_MS {
++                        atr_map.insert(sym.clone(), *atr_val);
++                        continue;
++                    }
++                }
++                symbols_to_fetch_atr.push(sym.clone());
+             }
+-            
+-            let mut tr_sum = 0.0;
+-            let mut valid_tr_count = 0;
+-            
+-            for i in 1..candles.len() {
+-                let current = &candles[i];
+-                let prev = &candles[i - 1];
+-                
+-                let h_l = current.high - current.low;
+-                let h_pc = (current.high - prev.close).abs();
+-                let l_pc = (current.low - prev.close).abs();
+-                
+-                let tr = h_l.max(h_pc).max(l_pc);
+-                
+-                // Cần chuẩn hóa True Range thành % (ATR Percentage) so với giá Close hiện tại để so sánh giữa các coin
+-                if current.close > 0.0 {
+-                    tr_sum += tr / current.close;
+-                    valid_tr_count += 1;
++        }
++
++        if !symbols_to_fetch_atr.is_empty() {
++            info!("Fetching historical 1D klines for {} symbols to update ATR cache...", symbols_to_fetch_atr.len());
++            if let Ok(klines_map) = self.rest_client.fetch_klines_bulk(&symbols_to_fetch_atr, "1d", 15).await {
++                let mut cache_write = self.atr_cache.write().await;
++                for (sym, candles) in klines_map {
++                    if candles.len() < 14 {
++                        cache_write.insert(sym.clone(), (-1.0, now));
++                        atr_map.insert(sym, -1.0); // Coin mới niêm yết
++                        continue;
++                    }
++                    
++                    let mut tr_sum = 0.0;
++                    let mut valid_tr_count = 0;
++                    
++                    for i in 1..candles.len() {
++                        let current = &candles[i];
++                        let prev = &candles[i - 1];
++                        let tr = (current.high - current.low).max((current.high - prev.close).abs()).max((current.low - prev.close).abs());
++                        if current.close > 0.0 {
++                            tr_sum += tr / current.close;
++                            valid_tr_count += 1;
++                        }
++                    }
++                    
++                    let atr_pct = if valid_tr_count > 0 { tr_sum / valid_tr_count as f64 } else { 0.0 };
++                    cache_write.insert(sym.clone(), (atr_pct, now));
++                    atr_map.insert(sym, atr_pct);
+                 }
+-            }
+-            
+-            let atr_pct = if valid_tr_count > 0 { tr_sum / valid_tr_count as f64 } else { 0.0 };
+-            atr_map.insert(sym, atr_pct);
++            }
+         }
+ 
+         // 7. Merge Data & Filter Top 150 by OI (Tránh Wash Trading)

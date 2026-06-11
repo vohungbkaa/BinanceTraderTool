@@ -1,0 +1,35 @@
+--- app/src-tauri/src/core/metadata.rs
++++ app/src-tauri/src/core/metadata.rs
+@@ -4,6 +4,8 @@
+ use std::collections::{HashSet, HashMap};
+ use serde::{Deserialize, Serialize};
+ use std::cmp::Ordering;
++use std::sync::Arc;
++use tokio::sync::RwLock;
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct UniverseCandidate {
+@@ -25,13 +27,15 @@
+ 
+ pub struct MetadataManager {
+     rest_client: BinanceRestClient,
++    atr_cache: Arc<RwLock<HashMap<String, (f64, i64)>>>,
+ }
+ 
+ impl MetadataManager {
+     pub fn new(rest_client: BinanceRestClient) -> Self {
+         Self {
+             rest_client,
++            atr_cache: Arc::new(RwLock::new(HashMap::new())),
+         }
+     }
+ 
+@@ -53,6 +57,8 @@
+         
+         const FUNDING_SAFE_THRESH: f64 = 0.0005;  // 0.05%
+         const FUNDING_RISK_THRESH: f64 = 0.0015;  // 0.15%
++        
++        const ATR_CACHE_TTL_MS: i64 = 4 * 60 * 60 * 1000; // Cache 4 giờ
+ 
+         // 1. Lọc Metadata từ Exchange Info (Chỉ lấy PERPETUAL & TRADING)
+         let exchange_info = self.rest_client.fetch_exchange_info().await?;

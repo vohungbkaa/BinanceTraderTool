@@ -234,6 +234,7 @@ impl BinanceWsClient {
             low: k["l"].as_str()?.parse().unwrap_or(0.0),
             close: k["c"].as_str()?.parse().unwrap_or(0.0),
             volume: k["v"].as_str()?.parse().unwrap_or(0.0),
+            quote_volume: k["q"].as_str()?.parse().unwrap_or(0.0),
             taker_buy_volume: k["V"].as_str()?.parse().unwrap_or(0.0),
             is_closed: k["x"].as_bool().unwrap_or(false),
         };

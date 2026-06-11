@@ -1,0 +1,34 @@
+--- app/src-tauri/src/core/metadata.rs
++++ app/src-tauri/src/core/metadata.rs
+@@ -194,15 +194,22 @@
+             }
+         }
+ 
++        // Fetch Open Interest 24h ago
++        let oi_hist_map = self.rest_client.fetch_oi_hist_24h_bulk(&top_symbols).await?;
++
+         // 7. Merge Data & Filter Top 150 by OI (Tránh Wash Trading)
+         let mut candidates: Vec<UniverseCandidate> = raw_candidates.into_iter().map(|r| {
+             let oi_nominal = *oi_map.get(&r.symbol).unwrap_or(&0.0);
+             
+             // [QUAN TRỌNG] Quy đổi OI ra USDT để phản ánh đúng dòng tiền Dollar-value
+             let open_interest = oi_nominal * r.last_price;
+             
++            let oi_hist = *oi_hist_map.get(&r.symbol).unwrap_or(&0.0);
++            let oi_change_24h_pct = if oi_hist > 0.0 { (oi_nominal - oi_hist) / oi_hist * 100.0 } else { 0.0 };
++            
+             let funding_rate_abs = *funding_map.get(&r.symbol).unwrap_or(&0.0);
+             let volatility = *atr_map.get(&r.symbol).unwrap_or(&-1.0); // True ATR%, default -1.0 cho an toàn (Neutral score)
+             
+             UniverseCandidate {
+                 symbol: r.symbol,
+                 quote_volume: r.vol,
+                 open_interest,
++                oi_change_24h_pct,
+                 volatility,
+                 funding_rate_abs,
+-                vol_score: 0.0, oi_score: 0.0, atr_score: 0.0, fund_score: 0.0, composite_score: 0.0,
++                vol_score: 0.0, oi_score: 0.0, oi_change_score: 0.0, atr_score: 0.0, fund_score: 0.0, composite_score: 0.0,
+                 price_change_percent: r.p_change,
+                 last_price: r.last_price,
+             }

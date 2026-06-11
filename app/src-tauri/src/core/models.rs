@@ -11,6 +11,7 @@ pub struct Candle {
     pub low: f64,
     pub close: f64,
     pub volume: f64,
+    pub quote_volume: f64,
     pub taker_buy_volume: f64,
     pub is_closed: bool,
 }

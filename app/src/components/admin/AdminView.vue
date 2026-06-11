@@ -6,11 +6,15 @@ import { invoke } from '@tauri-apps/api/core';
 interface UniverseCandidate {
   symbol: string;
   quote_volume: number;
+  volume_change_24h_pct: number;
   open_interest: number;
+  oi_change_24h_pct: number;
   volatility: number;
   funding_rate_abs: number;
   vol_score: number;
+  vol_change_score: number;
   oi_score: number;
+  oi_change_score: number;
   atr_score: number;
   fund_score: number;
   composite_score: number;
@@ -30,6 +34,7 @@ interface NormalizedCandleData {
     low: number;
     close: number;
     volume: number;
+    quote_volume: number;
     taker_buy_volume: number;
     is_closed: boolean;
   };
@@ -78,7 +83,9 @@ const filterTop100 = ref({
   symbol: '',
   score: '',
   volume: '',
+  vol_growth: '',
   oi: '',
+  oi_change: '',
   volatility: '',
   funding: '',
   price: '',
@@ -117,7 +124,9 @@ const filteredTopAltcoins = computed(() => {
     if (filterTop100.value.symbol && !coin.symbol.toLowerCase().includes(filterTop100.value.symbol.toLowerCase())) return false;
     if (!numFilter(coin.composite_score, filterTop100.value.score)) return false;
     if (!numFilter(coin.quote_volume, filterTop100.value.volume)) return false;
+    if (!numFilter(coin.volume_change_24h_pct, filterTop100.value.vol_growth)) return false;
     if (!numFilter(coin.open_interest, filterTop100.value.oi)) return false;
+    if (!numFilter(coin.oi_change_24h_pct, filterTop100.value.oi_change)) return false;
     if (!numFilter(coin.volatility, filterTop100.value.volatility)) return false;
     if (!numFilter(coin.funding_rate_abs, filterTop100.value.funding)) return false;
     if (!numFilter(coin.last_price, filterTop100.value.price)) return false;
@@ -285,7 +294,7 @@ onMounted(() => {
             Top 100 Scanning Universe 
             <span class="text-sm font-normal text-gray-500 ml-2">({{ filteredTopAltcoins.length }} / {{ topAltcoins.length }} records)</span>
           </h3>
-          <p class="text-sm text-gray-400">Verifying filtering criteria (Min-Max Normalization 0-100 scale. Sweet Spot = High Vol/OI, Low ATR/Funding).</p>
+          <p class="text-sm text-gray-400">Verifying filtering criteria (Weights: 25% Vol, 10% Vol Growth, 20% OI, 15% OI Growth, 20% ATR, 10% Funding).</p>
         </div>
         <div class="flex gap-3">
           <input 
@@ -310,7 +319,9 @@ onMounted(() => {
               <th scope="col" class="px-4 py-2 border-b border-gray-800 sticky left-[60px] z-20 bg-gray-900 shadow-[1px_0_0_#1f2937]">Symbol</th>
               <th scope="col" class="px-4 py-2 border-b border-gray-800 text-yellow-500 font-bold">Composite Score</th>
               <th scope="col" class="px-4 py-2 border-b border-gray-800">24h Quote Vol (USDT)</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800 text-blue-400">Vol Growth 24h</th>
               <th scope="col" class="px-4 py-2 border-b border-gray-800">Open Interest (USDT)</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800 text-purple-400">OI Change 24h</th>
               <th scope="col" class="px-4 py-2 border-b border-gray-800">Volatility (Proxy ATR)</th>
               <th scope="col" class="px-4 py-2 border-b border-gray-800">Funding Rate (Abs)</th>
               <th scope="col" class="px-4 py-2 border-b border-gray-800">Last Price</th>
@@ -321,8 +332,10 @@ onMounted(() => {
               <th class="p-1 sticky left-0 z-20 bg-gray-800"><input v-model="filterTop100.rank" class="w-12 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="<10" /></th>
               <th class="p-1 sticky left-[60px] z-20 bg-gray-800 shadow-[1px_0_0_#1f2937]"><input v-model="filterTop100.symbol" class="w-20 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="Filter..." /></th>
               <th class="p-1"><input v-model="filterTop100.score" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">80" /></th>
-              <th class="p-1"><input v-model="filterTop100.volume" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="e.g. >10000000" /></th>
-              <th class="p-1"><input v-model="filterTop100.oi" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">20000000" /></th>
+              <th class="p-1"><input v-model="filterTop100.volume" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="e.g. >10M" /></th>
+              <th class="p-1"><input v-model="filterTop100.vol_growth" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">20" /></th>
+              <th class="p-1"><input v-model="filterTop100.oi" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">20M" /></th>
+              <th class="p-1"><input v-model="filterTop100.oi_change" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">10" /></th>
               <th class="p-1"><input v-model="filterTop100.volatility" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="<0.05" /></th>
               <th class="p-1"><input v-model="filterTop100.funding" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="Filter" /></th>
               <th class="p-1"><input v-model="filterTop100.price" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="<1" /></th>
@@ -338,9 +351,17 @@ onMounted(() => {
                 <div>{{ formatCurrency(coin.quote_volume) }}</div>
                 <div class="text-[10px] text-gray-500 mt-0.5">Score: <span class="text-blue-500">{{ coin.vol_score.toFixed(1) }}</span></div>
               </td>
+              <td class="px-4 py-2 text-blue-300">
+                <div :class="coin.volume_change_24h_pct >= 0 ? 'text-green-400' : 'text-red-400'">{{ coin.volume_change_24h_pct > 0 ? '+' : '' }}{{ coin.volume_change_24h_pct.toFixed(2) }}%</div>
+                <div class="text-[10px] text-gray-500 mt-0.5">Score: <span class="text-blue-500">{{ coin.vol_change_score.toFixed(1) }}</span></div>
+              </td>
               <td class="px-4 py-2 text-purple-400">
                 <div>{{ formatCurrency(coin.open_interest) }}</div>
                 <div class="text-[10px] text-gray-500 mt-0.5">Score: <span class="text-purple-500">{{ coin.oi_score.toFixed(1) }}</span></div>
+              </td>
+              <td class="px-4 py-2 text-purple-300">
+                <div :class="coin.oi_change_24h_pct >= 0 ? 'text-green-400' : 'text-red-400'">{{ coin.oi_change_24h_pct > 0 ? '+' : '' }}{{ coin.oi_change_24h_pct.toFixed(2) }}%</div>
+                <div class="text-[10px] text-gray-500 mt-0.5">Score: <span class="text-purple-500">{{ coin.oi_change_score.toFixed(1) }}</span></div>
               </td>
               <td class="px-4 py-2 text-indigo-400">
                 <div>{{ (coin.volatility * 100).toFixed(2) }}%</div>
@@ -356,7 +377,7 @@ onMounted(() => {
               </td>
             </tr>
             <tr v-if="filteredTopAltcoins.length === 0 && !isLoadingTop100">
-              <td colspan="9" class="px-6 py-8 text-center text-gray-500">No data available.</td>
+              <td colspan="11" class="px-6 py-8 text-center text-gray-500">No data available.</td>
             </tr>
           </tbody>
         </table>

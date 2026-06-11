@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use super::models::{Candle, NormalizedCandleData, Indicators, MarketIndices, Microstructure, MacroEvents, CandleMetadata};
 use super::events::MarketEvent;
 
-// Base endpoint cho phép gửi payload SUBSCRIBE
-const BINANCE_WS_BASE_URL: &str = "wss://fstream.binance.com/ws";
+// Base endpoint cho phép gửi payload SUBSCRIBE (Sử dụng Combined Stream thuộc /market)
+const BINANCE_WS_BASE_URL: &str = "wss://fstream.binance.com/market/stream?streams=";
 
 pub struct BinanceWsClient {
     symbols: HashSet<String>,
@@ -43,10 +43,10 @@ impl BinanceWsClient {
     fn get_all_streams(&self) -> Vec<String> {
         let mut streams = Vec::new();
         for symbol in &self.symbols {
+            let sym_lower = symbol.to_lowercase();
             for tf in &self.timeframes {
-                streams.push(format!("{}@kline_{}", symbol, tf));
+                streams.push(format!("{}@kline_{}", sym_lower, tf));
             }
-            streams.push(format!("{}@openInterest", symbol));
         }
         
         streams.push("btcdomusdt@markPrice".to_string());
@@ -57,7 +57,11 @@ impl BinanceWsClient {
     }
 
     pub async fn run(&self) -> Result<()> {
-        let url = BINANCE_WS_BASE_URL.to_string();
+        let all_streams = self.get_all_streams();
+        
+        // Mở kết nối với 1 stream mồi để Binance xác nhận đây là kết nối hợp lệ thuộc nhánh /market
+        let initial_stream = "btcusdt@markPrice"; 
+        let url = format!("{}{}", BINANCE_WS_BASE_URL, initial_stream);
         
         tracing::info!("[WS] ATTEMPTING CONNECTION TO BASE URL: {}", url);
 
@@ -86,16 +90,29 @@ impl BinanceWsClient {
                         tokio::time::sleep(Duration::from_millis(500)).await; // Tránh rate limit của WebSocket
                     }
 
-                    // Sử dụng timeout để phát hiện mất kết nối (do khóa máy/Sleep)
-                    // Binance gửi Ping mỗi 3 phút, dữ liệu BTC cập nhật mỗi giây.
-                    // Nếu quá 60s không nhận được bất kỳ packet nào -> Chết connection.
+                    // 1. Giới hạn 24 giờ của Binance
+                    let connection_time = chrono::Utc::now();
+                    
                     loop {
+                        // Restart kết nối trước khi chạm ngưỡng 24h (ở đây an toàn lấy 23.5h)
+                        if chrono::Utc::now().signed_duration_since(connection_time).num_hours() >= 23 {
+                            tracing::info!("[WS] 23 hours elapsed. Proactively reconnecting to avoid Binance 24h force-drop...");
+                            break;
+                        }
+
                         match tokio::time::timeout(Duration::from_secs(60), read.next()).await {
                             Ok(Some(Ok(Message::Text(text)))) => {
                                 self.handle_message(text.as_str()).await;
                             }
-                            Ok(Some(Ok(Message::Ping(_)))) | Ok(Some(Ok(Message::Pong(_)))) => {
-                                // Tungstenite tự động trả lời Pong, ta chỉ cần nó để reset timeout.
+                            Ok(Some(Ok(Message::Ping(ping_data)))) => {
+                                // Mặc dù tungstenite tự phản hồi Pong, nhưng ta explicit send Pong để debug và chắc chắn 100%
+                                tracing::debug!("[WS] Received Ping from Binance, sending explicit Pong.");
+                                if let Err(e) = write.send(Message::Pong(ping_data)).await {
+                                    tracing::error!("[WS] Failed to send Pong: {}", e);
+                                }
+                            }
+                            Ok(Some(Ok(Message::Pong(_)))) => {
+                                // Bỏ qua
                             }
                             Ok(Some(Err(e))) => {
                                 tracing::error!("[WS] Read error: {}", e);
@@ -138,10 +155,10 @@ impl BinanceWsClient {
                 if let Some(normalized) = self.parse_kline(data.clone()) {
                     let k = &data["k"];
                     let is_closed = k["x"].as_bool().unwrap_or(false);
-                    
+
                     // Log nhẹ để xác nhận giá nhảy
                     if is_closed {
-                         println!("[WS KLINE CLOSED] {} | {} | Price: {} | Vol: {}", 
+                         tracing::info!("[WS KLINE CLOSED] {} | {} | Price: {} | Vol: {}", 
                             normalized.candle.symbol, 
                             normalized.candle.timeframe, 
                             normalized.candle.close,
@@ -164,7 +181,7 @@ impl BinanceWsClient {
                 let symbol = data["s"].as_str().unwrap_or("").to_string();
                 let oi = data["o"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                 let _ = self.event_tx.send(MarketEvent::DepthUpdated {
-                    symbol, spread_bps: 1.0, liquidity_score: oi, 
+                    symbol, is_liquidation: false, price: 0.0, value_usd: oi, 
                     timestamp: data["E"].as_i64().unwrap_or(0),
                 }).await;
             }
@@ -178,7 +195,7 @@ impl BinanceWsClient {
                                 let price = item["o"]["p"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                                 let _ = self.event_tx.send(MarketEvent::DepthUpdated {
                                     symbol: item["o"]["s"].as_str().unwrap_or("").to_string(),
-                                    spread_bps: 0.0, liquidity_score: amount * price,
+                                    is_liquidation: true, price, value_usd: amount * price,
                                     timestamp: item["E"].as_i64().unwrap_or(0),
                                 }).await;
                             },
@@ -217,6 +234,7 @@ impl BinanceWsClient {
             low: k["l"].as_str()?.parse().unwrap_or(0.0),
             close: k["c"].as_str()?.parse().unwrap_or(0.0),
             volume: k["v"].as_str()?.parse().unwrap_or(0.0),
+            taker_buy_volume: k["V"].as_str()?.parse().unwrap_or(0.0),
             is_closed: k["x"].as_bool().unwrap_or(false),
         };
 

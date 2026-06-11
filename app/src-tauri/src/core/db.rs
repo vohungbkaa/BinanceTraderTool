@@ -178,6 +178,7 @@ impl Database {
                     low: r.get(6),
                     close: r.get(7),
                     volume: r.get(8),
+                    quote_volume: 0.0,
                     taker_buy_volume: 0.0,
                     is_closed: true,
                 },
@@ -229,6 +230,7 @@ impl Database {
                     low: r.get(6),
                     close: r.get(7),
                     volume: r.get(8),
+                    quote_volume: 0.0,
                     taker_buy_volume: 0.0,
                     is_closed: true,
                 },
@@ -289,6 +291,7 @@ impl Database {
                 low: r.get(6),
                 close: r.get(7),
                 volume: r.get(8),
+                quote_volume: 0.0,
                 taker_buy_volume: 0.0,
                 is_closed: true,
             }
