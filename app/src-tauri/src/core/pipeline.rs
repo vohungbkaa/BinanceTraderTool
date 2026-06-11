@@ -323,101 +323,91 @@ impl DataPipeline {
     }
 
     async fn perform_warmup(&mut self) -> Result<()> {
-        info!("Performing intelligent warm-up (DB Cache First)...");
+        info!("Performing high-performance incremental warm-up...");
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
             step: "WARMUP_START".to_string(),
             progress: 0.0,
-            message: "Starting intelligent data warm-up...".to_string(),
+            message: "Starting high-speed data warm-up...".to_string(),
         });
 
         let timeframes = load_timeframes_from_config();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let total_steps = timeframes.len() * self.symbols.len();
-        let mut completed_steps = 0;
+        let completed_steps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        
+        // Sử dụng Semaphore để giới hạn 20 yêu cầu song song (Cực nhanh nhưng vẫn an toàn)
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(20));
+        let mut join_handles = Vec::new();
 
-        for tf in &timeframes {
+        for tf in timeframes {
             let tf_str = tf.to_string();
-            // Chia lô 5 symbols tải song song để tối ưu tốc độ và Rate Limit
-            for chunk in self.symbols.chunks(5) {
-                let mut tasks = Vec::new();
-                for symbol in chunk {
-                    let symbol = symbol.clone();
-                    let tf = tf_str.clone();
-                    let db = self.db.clone();
-                    let rest_client = self.rest_client.clone();
-                    let indicator_engine = self.indicator_engine.clone();
+            for symbol in &self.symbols {
+                let symbol = symbol.clone();
+                let tf = tf_str.clone();
+                let db = self.db.clone();
+                let rest_client = self.rest_client.clone();
+                let indicator_engine = self.indicator_engine.clone();
+                let app_handle = self.app_handle.clone();
+                let completed_steps = completed_steps.clone();
+                let total_steps = total_steps;
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
 
-                    tasks.push(tokio::spawn(async move {
-                        let last_update = db.get_last_update_time(&symbol, &tf).await.unwrap_or(0);
-                        
-                        let interval_ms = timeframe_to_ms(&tf);
-                        
-                        let is_fresh = (now_ms - last_update) < interval_ms;
-                        let candles = db.get_candles(&symbol, &tf, 200).await.unwrap_or_default();
-                        let has_enough = candles.len() >= 200;
+                join_handles.push(tokio::spawn(async move {
+                    let _permit = permit; // Giữ permit cho đến khi task xong
+                    let last_update = db.get_last_update_time(&symbol, &tf).await.unwrap_or(0);
+                    let interval_ms = timeframe_to_ms(&tf);
+                    
+                    // Nếu dữ liệu cũ hơn 1 chu kỳ nến -> Cần bù
+                    if (now_ms - last_update) > interval_ms {
+                        // Tính toán số lượng nến thực sự thiếu
+                        let missing_candles = ((now_ms - last_update) / interval_ms).min(200) as u32;
+                        let fetch_limit = if last_update == 0 { 200 } else { missing_candles + 2 };
 
-                        if is_fresh && has_enough {
-                            for candle in candles {
+                        if fetch_limit > 0 {
+                            if let Ok(data) = rest_client.fetch_klines(&symbol, &tf, fetch_limit).await {
                                 let mut engine = indicator_engine.lock().await;
-                                let inds = engine.process(&candle);
-                                let data = NormalizedCandleData {
-                                    candle: candle.clone(),
-                                    indicators: inds,
-                                    ..Default::default()
-                                };
-                                let _ = db.insert_closed_candle(&data).await;
-                            }
-                            info!("Warm-up complete for {} {} (Used DB Cache & Updated Indicators)", symbol, tf);
-                        } else {
-                            info!("Fetching fresh data for {} {}: is_fresh={}, count={}", symbol, tf, is_fresh, candles.len());
-                            match rest_client.fetch_klines(&symbol, &tf, 200).await {
-                                Ok(data) => {
-                                    let now_ms = chrono::Utc::now().timestamp_millis();
-                                    for c in &data {
-                                        // CHỈ lưu vào DB nếu nến ĐÃ THỰC SỰ KẾT THÚC (close_time < now)
-                                        if c.close_time < now_ms {
-                                            let mut engine = indicator_engine.lock().await;
-                                            let inds = engine.process(c);
-                                            let normalized_data = NormalizedCandleData {
-                                                candle: c.clone(),
-                                                indicators: inds,
-                                                ..Default::default()
-                                            };
-                                            let _ = db.insert_closed_candle(&normalized_data).await;
-                                        }
+                                for c in &data {
+                                    if c.close_time < now_ms {
+                                        let inds = engine.process(c);
+                                        let normalized_data = NormalizedCandleData {
+                                            candle: c.clone(),
+                                            indicators: inds,
+                                            ..Default::default()
+                                        };
+                                        let _ = db.insert_closed_candle(&normalized_data).await;
                                     }
-                                    info!("Warm-up complete for {} {} (Fetched from Binance & Saved)", symbol, tf);
-                                }
-                                Err(e) => {
-                                    warn!("Failed to fetch {} {}: {}", symbol, tf, e);
                                 }
                             }
                         }
-                    }));
-                }
+                    } else {
+                        // Dữ liệu đã mới, chỉ cần load từ DB để hâm nóng Indicator State
+                        let candles = db.get_candles(&symbol, &tf, 200).await.unwrap_or_default();
+                        let mut engine = indicator_engine.lock().await;
+                        for candle in candles {
+                            let _ = engine.process(&candle);
+                        }
+                    }
 
-                // Đợi tất cả tasks trong lô chạy xong
-                for task in tasks {
-                    let _ = task.await;
-                    completed_steps += 1;
-                    
-                    let progress = (completed_steps as f64 / total_steps as f64) * 100.0;
-                    let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+                    let done = completed_steps.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    let progress = (done as f64 / total_steps as f64) * 100.0;
+                    let _ = app_handle.emit("market-event", &MarketEvent::SyncProgress {
                         step: "WARMUP".to_string(),
                         progress,
-                        message: format!("Warming up: {} steps/{}", completed_steps, total_steps),
+                        message: format!("Syncing {} {}: {}/{}", symbol, tf, done, total_steps),
                     });
-                }
-                
-                // Sleep nhẹ để reset Rate Limit (rất an toàn cho Binance Futures)
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }));
             }
+        }
+
+        // Đợi tất cả hoàn tất
+        for handle in join_handles {
+            let _ = handle.await;
         }
 
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
             step: "WARMUP_DONE".to_string(),
             progress: 100.0,
-            message: "All symbols warmed up and ready.".to_string(),
+            message: "System fully synchronized.".to_string(),
         });
 
         Ok(())
@@ -573,7 +563,7 @@ fn load_timeframes_from_config() -> Vec<String> {
     crate::core::config::AppConfig::load().timeframes
 }
 
-fn timeframe_to_ms(tf: &str) -> i64 {
+pub fn timeframe_to_ms(tf: &str) -> i64 {
     let num_str: String = tf.chars().take_while(|c| c.is_numeric()).collect();
     let unit: String = tf.chars().skip_while(|c| c.is_numeric()).collect();
     let num = num_str.parse::<i64>().unwrap_or(1);

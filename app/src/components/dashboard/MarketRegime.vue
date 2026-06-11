@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { Brain, ShieldAlert, Zap, Activity, Info } from '@lucide/vue';
+import { Brain, Zap, Activity, Info } from '@lucide/vue';
 import type { MarketRegimeContext } from '../../types/market';
-import { RiskStatus, VolatilityRegime } from '../../types/market';
+import { VolatilityRegime } from '../../types/market';
 
 defineProps<{
   regime: MarketRegimeContext;
