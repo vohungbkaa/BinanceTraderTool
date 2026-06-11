@@ -37,15 +37,15 @@ pub struct DataPipeline {
 }
 
 impl DataPipeline {
-    /// [CONSTRUCTOR] Khởi tạo bộ máy DataPipeline.
-    /// Tương đương với việc tạo một 'class' DataPipeline trong Java/Kotlin.
+    /// [CONSTRUCTOR] Khởi tạo thực thể DataPipeline.
+    /// Thiết lập các kết nối mạng, kênh truyền tin và các engine con.
     pub fn new(
         symbols: Vec<String>, 
         db: Arc<Database>, 
         global_event_tx: broadcast::Sender<MarketEvent>,
         app_handle: AppHandle,
     ) -> Self {
-        // Tạo các kênh truyền tin nội bộ (MPSC) để nhận dữ liệu từ WebSocket Thread.
+        // Khởi tạo kênh truyền tin MPSC (Multi-Producer, Single-Consumer) cho sự kiện thị trường.
         let (market_tx, market_rx) = mpsc::channel(1000);
         let (system_tx, system_rx) = mpsc::channel(100);
 
@@ -55,7 +55,6 @@ impl DataPipeline {
         
         let indicator_engine = Arc::new(Mutex::new(IndicatorEngine::new()));
 
-        // Trả về một thực thể (instance) hoàn chỉnh.
         Self {
             market_event_rx: market_rx,
             system_event_rx: system_rx,
@@ -74,19 +73,19 @@ impl DataPipeline {
         }
     }
 
-    /// [PHASE 0 ENTRY POINT] Khởi động hệ thống nạp và điều phối dữ liệu.
+    /// [ORCHESTRATION] Khởi động luồng điều phối dữ liệu (Phase 0).
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting Data Pipeline (Phase 0)...");
 
-        // 1. [INITIALIZATION] Đồng bộ danh sách Coin và tính Market Breadth ban đầu.
-        // Đây là bước "Kiểm tra thời tiết" trước khi cất cánh.
+        // 1. [METADATA SYNC] Đồng bộ thông tin thị trường và tính Market Breadth ban đầu.
+        // Đây là bước thiết lập tham số môi trường trước khi tiếp nhận dữ liệu thực.
         self.sync_metadata_and_breadth().await?;
 
-        // 2. [WARMUP] Tải nến cũ từ Database hoặc Binance.
-        // Đảm bảo các chỉ báo kỹ thuật (EMA, ADX...) có đủ dữ liệu lịch sử để tính toán chính xác.
+        // 2. [WARMUP] Tải dữ liệu lịch sử từ Database/API để làm đầy Cache chỉ báo.
+        // Đảm bảo các Technical Indicators có đủ tham số đầu vào ngay khi hệ thống chạy.
         self.perform_warmup().await?;
 
-        // 3. [NEWS LOOP] Khởi chạy vòng lặp cập nhật tin tức kinh tế (Mỗi 30 phút).
+        // 3. [RISK UPDATE LOOP] Tác vụ nền cập nhật lịch sự kiện kinh tế (Mỗi 30 phút).
         let risk_manager_clone = Arc::clone(&self.risk_manager);
         tokio::spawn(async move {
             loop {
@@ -98,7 +97,7 @@ impl DataPipeline {
             }
         });
 
-        // 4. [SCHEDULED SYNC] Cập nhật định kỳ danh sách Top 100 và Market Breadth (Mỗi 1 tiếng).
+        // 4. [BACKGROUND SYNC] Cập nhật định kỳ Metadata và Market Breadth (Mỗi 1 tiếng).
         let breadth_engine_clone = Arc::clone(&self.breadth_engine);
         let metadata_manager_clone = MetadataManager::new(self.rest_client.clone());
         let risk_manager_for_total3 = Arc::clone(&self.risk_manager);
@@ -121,7 +120,7 @@ impl DataPipeline {
             }
         });
 
-        // 5. [WEBSOCKET] Mở "vòi nước" dữ liệu thời gian thực từ sàn Binance.
+        // 5. [DATA INGESTION] Kích hoạt kết nối WebSocket nhận dữ liệu Realtime.
         let ws_client_clone = Arc::clone(&self.ws_client);
         tokio::spawn(async move {
             let mut client = ws_client_clone.lock().await;
@@ -130,28 +129,28 @@ impl DataPipeline {
             }
         });
 
-        // 6. [MAIN EVENT LOOP] Vòng lặp sự kiện chính (Trạm trực chiến).
-        // Lắng nghe dữ liệu từ sàn và lệnh từ Phase 1 để kích hoạt Phase 2.
+        // 6. [MAIN DISPATCH LOOP] Vòng lặp điều hướng sự kiện chính.
+        // Tiếp nhận dữ liệu từ WebSocket và lệnh điều khiển từ Phase 1 để kích hoạt Phase 2.
         let mut regime_rx = self.global_event_tx.subscribe();
         
         loop {
             tokio::select! {
-                // A. Nhận dữ liệu nến/giá từ WebSocket
+                // A. Xử lý dữ liệu thị trường trực tiếp (Nến, Giá, Thanh lý)
                 Some(market_event) = self.market_event_rx.recv() => {
                     self.handle_market_event(market_event).await;
                 }
-                // B. Nhận tin nhắn cập nhật trạng thái thị trường từ Phase 1 (Regime Engine)
+                // B. Lắng nghe cập nhật bối cảnh thị trường từ Regime Engine
                 Ok(global_event) = regime_rx.recv() => {
                     if let MarketEvent::RegimeUpdated(context) = global_event {
-                        // Forward trạng thái lên UI để người dùng thấy BLOCKED/ENABLED
+                        // Đồng bộ trạng thái hệ thống lên giao diện người dùng (UI)
                         let _ = self.app_handle.emit("market-event", &MarketEvent::RegimeUpdated(context.clone()));
 
-                        // Nếu Phase 1 cho phép -> Kích hoạt PHASE 2: Altcoin Scanner
+                        // Kiểm tra điều kiện Gatekeeper: Nếu Phase 1 cho phép -> Kích hoạt Phase 2 (Scanner)
                         if context.allow_alt_scan {
                             let now = chrono::Utc::now().timestamp();
                             let mut last_scan = self.last_scan_timestamp.lock().await;
                             
-                            // [THROTTLE] Giới hạn tần suất quét (Ví dụ: 15 phút/lần) để tránh nhiễu.
+                            // [THROTTLING] Kiểm soát tần suất quét để tối ưu hóa hiệu năng và Rate Limit.
                             if now - *last_scan >= 900 {
                                 *last_scan = now;
                                 self.trigger_altcoin_scan(context).await;
