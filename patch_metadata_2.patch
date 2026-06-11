@@ -1,0 +1,11 @@
+--- app/src-tauri/src/core/metadata.rs
++++ app/src-tauri/src/core/metadata.rs
+@@ -194,7 +194,7 @@
+         }
+ 
+         // 8. Sort by Composite Score Descending (Highest Score is Best)
+-        candidates.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap());
++        candidates.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap_or(Ordering::Equal));
+ 
+         // 9. Truncate to Final Target (Top 100)
+         candidates.truncate(limit);

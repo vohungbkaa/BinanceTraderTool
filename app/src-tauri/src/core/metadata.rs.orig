@@ -3,7 +3,6 @@ use crate::core::rest::BinanceRestClient;
 use tracing::{info, warn};
 use std::collections::{HashSet, HashMap};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UniverseCandidate {
@@ -170,11 +169,7 @@ impl MetadataManager {
 
         // 7. Merge Data & Filter Top 150 by OI (Tránh Wash Trading)
         let mut candidates: Vec<UniverseCandidate> = raw_candidates.into_iter().map(|r| {
-            let oi_nominal = *oi_map.get(&r.symbol).unwrap_or(&0.0);
-            
-            // [QUAN TRỌNG] Quy đổi OI ra USDT để phản ánh đúng dòng tiền Dollar-value
-            let open_interest = oi_nominal * r.last_price;
-            
+            let open_interest = *oi_map.get(&r.symbol).unwrap_or(&0.0);
             let funding_rate_abs = *funding_map.get(&r.symbol).unwrap_or(&0.0);
             let volatility = *atr_map.get(&r.symbol).unwrap_or(&0.0); // True ATR%
             
@@ -249,7 +244,7 @@ impl MetadataManager {
         }
 
         // 8. Sort by Composite Score Descending (Highest Score is Best)
-        candidates.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap_or(Ordering::Equal));
+        candidates.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap());
 
         // 9. Truncate to Final Target (Top 100)
         candidates.truncate(limit);

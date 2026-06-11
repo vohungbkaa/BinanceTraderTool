@@ -1,0 +1,29 @@
+--- app/src-tauri/src/core/metadata.rs
++++ app/src-tauri/src/core/metadata.rs
+@@ -109,7 +109,7 @@
+         // 7. Merge Data & Filter Top 150 by OI (Tránh Wash Trading)
+         let mut candidates: Vec<UniverseCandidate> = raw_candidates.into_iter().map(|r| {
+             let oi_nominal = *oi_map.get(&r.symbol).unwrap_or(&0.0);
+-            let open_interest = oi_nominal;
++            let open_interest = oi_nominal * r.last_price;
+             let funding_rate_abs = *funding_map.get(&r.symbol).unwrap_or(&0.0);
+             let volatility = *atr_map.get(&r.symbol).unwrap_or(&0.0); // True ATR%
+             
+@@ -128,7 +128,7 @@
+             }
+         }).collect();
+ 
+-        candidates.sort_by(|a, b| b.open_interest.partial_cmp(&a.open_interest).unwrap());
++        candidates.sort_by(|a, b| b.open_interest.partial_cmp(&a.open_interest).unwrap_or(Ordering::Equal));
+         candidates.truncate(OI_FILTER_LIMIT);
+ 
+         // 8. Advanced Scoring Logic
+@@ -194,7 +194,7 @@
+         }
+ 
+         // 9. Sort by Composite Score Descending (Highest Score is Best)
+-        candidates.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap());
++        candidates.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap_or(Ordering::Equal));
+ 
+         // 10. Truncate to Final Target (Top 100)
+         candidates.truncate(limit);
