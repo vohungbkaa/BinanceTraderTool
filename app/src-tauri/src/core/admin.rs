@@ -11,16 +11,28 @@ pub struct AltcoinMetadata {
     pub last_price: f64,
 }
 
+#[derive(Serialize)]
+pub struct DbCandlesResponse {
+    pub data: Vec<crate::core::models::NormalizedCandleData>,
+    pub total: i64,
+}
+
 #[tauri::command]
 pub async fn get_db_candles(
     symbol: String,
     timeframe: String,
     limit: usize,
     db: State<'_, std::sync::Arc<Database>>,
-) -> Result<Vec<crate::core::models::NormalizedCandleData>, String> {
-    db.get_candles_with_indicators(&symbol, &timeframe, limit)
+) -> Result<DbCandlesResponse, String> {
+    let data = db.search_candles_with_indicators(&symbol, &timeframe, limit)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        
+    let total = db.count_search_candles(&symbol, &timeframe)
+        .await
+        .unwrap_or(0);
+        
+    Ok(DbCandlesResponse { data, total })
 }
 
 #[tauri::command]

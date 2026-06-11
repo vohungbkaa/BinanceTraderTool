@@ -200,6 +200,70 @@ impl Database {
         Ok(data)
     }
 
+    /// Tìm kiếm nến thô kèm chỉ báo kỹ thuật theo symbol (chấp nhận tìm kiếm một phần LIKE %symbol%)
+    pub async fn search_candles_with_indicators(&self, search_term: &str, timeframe: &str, limit: usize) -> Result<Vec<crate::core::models::NormalizedCandleData>> {
+        let pattern = format!("%{}%", search_term.to_uppercase());
+        let rows = sqlx::query(
+            "SELECT symbol, timeframe, open_time, close_time, open, high, low, close, volume,
+                    ema20, ema50, ema200, atr14, adx14, plus_di, minus_di, structure
+             FROM closed_candles 
+             WHERE symbol LIKE ?1 AND timeframe = ?2 
+             ORDER BY open_time DESC LIMIT ?3"
+        )
+        .bind(pattern)
+        .bind(timeframe)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut data: Vec<crate::core::models::NormalizedCandleData> = rows.iter().map(|r| {
+            crate::core::models::NormalizedCandleData {
+                timestamp: r.get(2),
+                candle: crate::core::models::Candle {
+                    symbol: r.get(0),
+                    timeframe: r.get(1),
+                    open_time: r.get(2),
+                    close_time: r.get(3),
+                    open: r.get(4),
+                    high: r.get(5),
+                    low: r.get(6),
+                    close: r.get(7),
+                    volume: r.get(8),
+                    taker_buy_volume: 0.0,
+                    is_closed: true,
+                },
+                indicators: crate::core::models::Indicators {
+                    ema20: r.get(9),
+                    ema50: r.get(10),
+                    ema200: r.get(11),
+                    atr14: r.get(12),
+                    adx14: r.get(13),
+                    plus_di: r.get(14),
+                    minus_di: r.get(15),
+                    structure: r.get(16),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }).collect();
+        
+        data.reverse(); // Đảo lại theo thứ tự thời gian tăng dần
+        Ok(data)
+    }
+
+    /// Đếm tổng số nến thô kèm chỉ báo kỹ thuật theo symbol (cho phân trang/hiển thị)
+    pub async fn count_search_candles(&self, search_term: &str, timeframe: &str) -> Result<i64> {
+        let pattern = format!("%{}%", search_term.to_uppercase());
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM closed_candles WHERE symbol LIKE ?1 AND timeframe = ?2"
+        )
+        .bind(pattern)
+        .bind(timeframe)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
     /// Lấy danh sách nến thô
     pub async fn get_candles(&self, symbol: &str, timeframe: &str, limit: usize) -> Result<Vec<crate::core::models::Candle>> {
         let rows = sqlx::query(
