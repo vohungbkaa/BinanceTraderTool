@@ -3,9 +3,17 @@ import { ref, onMounted, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 
 // Types matching the Rust backend
-interface AltcoinMetadata {
+interface UniverseCandidate {
   symbol: string;
   quote_volume: number;
+  open_interest: number;
+  volatility: number;
+  funding_rate_abs: number;
+  vol_score: number;
+  oi_score: number;
+  atr_score: number;
+  fund_score: number;
+  composite_score: number;
   price_change_percent: number;
   last_price: number;
 }
@@ -60,7 +68,7 @@ interface NormalizedCandleData {
 const activeTab = ref<'top100' | 'candles'>('top100');
 
 // Data for Top 100
-const topAltcoins = ref<AltcoinMetadata[]>([]);
+const topAltcoins = ref<UniverseCandidate[]>([]);
 const isLoadingTop100 = ref(false);
 const searchTop100 = ref(''); // Global search
 
@@ -68,7 +76,11 @@ const searchTop100 = ref(''); // Global search
 const filterTop100 = ref({
   rank: '',
   symbol: '',
+  score: '',
   volume: '',
+  oi: '',
+  volatility: '',
+  funding: '',
   price: '',
   change: ''
 });
@@ -103,7 +115,11 @@ const filteredTopAltcoins = computed(() => {
     // Column filters
     if (filterTop100.value.rank && !String(index + 1).includes(filterTop100.value.rank)) return false;
     if (filterTop100.value.symbol && !coin.symbol.toLowerCase().includes(filterTop100.value.symbol.toLowerCase())) return false;
+    if (!numFilter(coin.composite_score, filterTop100.value.score)) return false;
     if (!numFilter(coin.quote_volume, filterTop100.value.volume)) return false;
+    if (!numFilter(coin.open_interest, filterTop100.value.oi)) return false;
+    if (!numFilter(coin.volatility, filterTop100.value.volatility)) return false;
+    if (!numFilter(coin.funding_rate_abs, filterTop100.value.funding)) return false;
     if (!numFilter(coin.last_price, filterTop100.value.price)) return false;
     if (!numFilter(coin.price_change_percent, filterTop100.value.change)) return false;
     
@@ -170,11 +186,10 @@ const filteredDbCandles = computed(() => {
   });
 });
 
-
 const loadTopAltcoins = async () => {
   isLoadingTop100.value = true;
   try {
-    const data = await invoke<AltcoinMetadata[]>('get_top_altcoins_metadata');
+    const data = await invoke<UniverseCandidate[]>('get_top_altcoins_metadata');
     topAltcoins.value = data;
   } catch (error) {
     console.error('Failed to load top altcoins metadata:', error);
@@ -270,7 +285,7 @@ onMounted(() => {
             Top 100 Scanning Universe 
             <span class="text-sm font-normal text-gray-500 ml-2">({{ filteredTopAltcoins.length }} / {{ topAltcoins.length }} records)</span>
           </h3>
-          <p class="text-sm text-gray-400">Verifying filtering criteria (Volume > 5M USDT, no stablecoins).</p>
+          <p class="text-sm text-gray-400">Verifying filtering criteria (Min-Max Normalization 0-100 scale. Sweet Spot = High Vol/OI, Low ATR/Funding).</p>
         </div>
         <div class="flex gap-3">
           <input 
@@ -287,37 +302,61 @@ onMounted(() => {
       </div>
 
       <div class="overflow-x-auto rounded-lg border border-gray-800 h-[600px] relative">
-        <table class="w-full text-sm text-left text-gray-300 relative">
+        <table class="w-full text-sm text-left text-gray-300 relative whitespace-nowrap">
           <thead class="text-xs text-gray-400 uppercase bg-gray-900 border-b border-gray-800 sticky top-0 z-10">
             <!-- Header Names -->
             <tr>
-              <th scope="col" class="px-6 py-2 border-b border-gray-800">Rank</th>
-              <th scope="col" class="px-6 py-2 border-b border-gray-800">Symbol</th>
-              <th scope="col" class="px-6 py-2 border-b border-gray-800">24h Quote Volume (USDT)</th>
-              <th scope="col" class="px-6 py-2 border-b border-gray-800">Last Price</th>
-              <th scope="col" class="px-6 py-2 border-b border-gray-800">24h Change</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800 sticky left-0 z-20 bg-gray-900">Rank</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800 sticky left-[60px] z-20 bg-gray-900 shadow-[1px_0_0_#1f2937]">Symbol</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800 text-yellow-500 font-bold">Composite Score</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800">24h Quote Vol (USDT)</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800">Open Interest (USDT)</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800">Volatility (Proxy ATR)</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800">Funding Rate (Abs)</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800">Last Price</th>
+              <th scope="col" class="px-4 py-2 border-b border-gray-800">24h Change</th>
             </tr>
             <!-- Filter Inputs -->
-            <tr class="bg-gray-800/40">
-              <th class="px-2 py-1"><input v-model="filterTop100.rank" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="e.g. >10" /></th>
-              <th class="px-2 py-1"><input v-model="filterTop100.symbol" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="Filter..." /></th>
-              <th class="px-2 py-1"><input v-model="filterTop100.volume" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="e.g. >10000000" /></th>
-              <th class="px-2 py-1"><input v-model="filterTop100.price" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="e.g. <1" /></th>
-              <th class="px-2 py-1"><input v-model="filterTop100.change" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="e.g. >5" /></th>
+            <tr class="bg-gray-800/80 border-b border-gray-800">
+              <th class="p-1 sticky left-0 z-20 bg-gray-800"><input v-model="filterTop100.rank" class="w-12 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="<10" /></th>
+              <th class="p-1 sticky left-[60px] z-20 bg-gray-800 shadow-[1px_0_0_#1f2937]"><input v-model="filterTop100.symbol" class="w-20 bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="Filter..." /></th>
+              <th class="p-1"><input v-model="filterTop100.score" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">80" /></th>
+              <th class="p-1"><input v-model="filterTop100.volume" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="e.g. >10000000" /></th>
+              <th class="p-1"><input v-model="filterTop100.oi" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">20000000" /></th>
+              <th class="p-1"><input v-model="filterTop100.volatility" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="<0.05" /></th>
+              <th class="p-1"><input v-model="filterTop100.funding" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="Filter" /></th>
+              <th class="p-1"><input v-model="filterTop100.price" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="<1" /></th>
+              <th class="p-1"><input v-model="filterTop100.change" class="w-full bg-gray-900/50 border border-gray-700/50 text-gray-300 text-[10px] rounded px-1.5 py-1 focus:ring-1 focus:ring-blue-500 outline-none" placeholder=">5" /></th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="(coin, index) in filteredTopAltcoins" :key="coin.symbol" class="border-b border-gray-800 hover:bg-gray-800/50">
-              <td class="px-6 py-3 font-medium text-gray-500">#{{ index + 1 }}</td>
-              <td class="px-6 py-3 font-bold text-white">{{ coin.symbol }}</td>
-              <td class="px-6 py-3 text-blue-400">{{ formatCurrency(coin.quote_volume) }}</td>
-              <td class="px-6 py-3">{{ formatNumber(coin.last_price) }}</td>
-              <td :class="['px-6 py-3 font-medium', coin.price_change_percent >= 0 ? 'text-green-500' : 'text-red-500']">
+              <td class="px-4 py-2 font-medium text-gray-500 sticky left-0 bg-[#12161a] z-10">#{{ index + 1 }}</td>
+              <td class="px-4 py-2 font-bold text-white sticky left-[60px] bg-[#12161a] z-10 shadow-[1px_0_0_#1f2937]">{{ coin.symbol }}</td>
+              <td class="px-4 py-2 text-xl font-bold text-yellow-500 bg-yellow-500/5 rounded-md text-center">{{ coin.composite_score.toFixed(1) }}</td>
+              <td class="px-4 py-2 text-blue-400">
+                <div>{{ formatCurrency(coin.quote_volume) }}</div>
+                <div class="text-[10px] text-gray-500 mt-0.5">Score: <span class="text-blue-500">{{ coin.vol_score.toFixed(1) }}</span></div>
+              </td>
+              <td class="px-4 py-2 text-purple-400">
+                <div>{{ formatCurrency(coin.open_interest) }}</div>
+                <div class="text-[10px] text-gray-500 mt-0.5">Score: <span class="text-purple-500">{{ coin.oi_score.toFixed(1) }}</span></div>
+              </td>
+              <td class="px-4 py-2 text-indigo-400">
+                <div>{{ (coin.volatility * 100).toFixed(2) }}%</div>
+                <div class="text-[10px] text-gray-500 mt-0.5" title="Inverse scale: High score = Low volatility (Compression)">Score: <span class="text-indigo-500">{{ coin.atr_score.toFixed(1) }}</span></div>
+              </td>
+              <td class="px-4 py-2 text-pink-400">
+                <div>{{ (coin.funding_rate_abs * 100).toFixed(4) }}%</div>
+                <div class="text-[10px] text-gray-500 mt-0.5" title="Inverse scale: High score = Near zero (Balanced)">Score: <span class="text-pink-500">{{ coin.fund_score.toFixed(1) }}</span></div>
+              </td>
+              <td class="px-4 py-2">{{ formatNumber(coin.last_price) }}</td>
+              <td :class="['px-4 py-2 font-medium', coin.price_change_percent >= 0 ? 'text-green-500' : 'text-red-500']">
                 {{ coin.price_change_percent > 0 ? '+' : '' }}{{ coin.price_change_percent.toFixed(2) }}%
               </td>
             </tr>
             <tr v-if="filteredTopAltcoins.length === 0 && !isLoadingTop100">
-              <td colspan="5" class="px-6 py-8 text-center text-gray-500">No data available.</td>
+              <td colspan="9" class="px-6 py-8 text-center text-gray-500">No data available.</td>
             </tr>
           </tbody>
         </table>

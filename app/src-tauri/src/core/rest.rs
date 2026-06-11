@@ -89,4 +89,47 @@ impl BinanceRestClient {
         let res = self.client.get(&url).send().await?.json::<Vec<Value>>().await?;
         Ok(res)
     }
+
+    /// Lấy thông tin Open Interest của một symbol
+    pub async fn fetch_open_interest(&self, symbol: &str) -> Result<Value> {
+        let url = format!("{}/fapi/v1/openInterest?symbol={}", self.base_url, symbol);
+        let res = self.client.get(&url).send().await?.json::<Value>().await?;
+        Ok(res)
+    }
+
+    /// Lấy Open Interest cho nhiều symbols đồng thời với giới hạn concurrency
+    pub async fn fetch_open_interest_bulk(&self, symbols: &[String]) -> Result<std::collections::HashMap<String, f64>> {
+        use futures_util::stream::StreamExt;
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let semaphore = Arc::new(Semaphore::new(20)); // Max 20 concurrent requests
+        let mut tasks = Vec::new();
+
+        for symbol in symbols {
+            let sym = symbol.clone();
+            let client = self.clone();
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            
+            tasks.push(tokio::spawn(async move {
+                let _permit = permit;
+                match client.fetch_open_interest(&sym).await {
+                    Ok(val) => {
+                        let oi = val["openInterest"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                        Some((sym, oi))
+                    }
+                    Err(_) => None,
+                }
+            }));
+        }
+
+        let mut results = std::collections::HashMap::new();
+        for task in futures_util::future::join_all(tasks).await {
+            if let Ok(Some((sym, oi))) = task {
+                results.insert(sym, oi);
+            }
+        }
+
+        Ok(results)
+    }
 }
