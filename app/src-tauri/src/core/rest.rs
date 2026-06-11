@@ -132,4 +132,42 @@ impl BinanceRestClient {
 
         Ok(results)
     }
+
+    /// Lấy nến lịch sử cho nhiều symbols đồng thời (Dùng để tính ATR chuẩn)
+    pub async fn fetch_klines_bulk(&self, symbols: &[String], interval: &str, limit: u32) -> Result<std::collections::HashMap<String, Vec<Candle>>> {
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        // Giới hạn requests concurrent để tránh IP Ban. Klines nặng hơn Open Interest nên dùng limit nhỏ hơn (10).
+        let semaphore = Arc::new(Semaphore::new(10)); 
+        let mut tasks = Vec::new();
+
+        for symbol in symbols {
+            let sym = symbol.clone();
+            let interval_clone = interval.to_string();
+            let client = self.clone();
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            
+            tasks.push(tokio::spawn(async move {
+                let _permit = permit;
+                // Fetch klines có thể fail, ta bỏ qua lỗi (hoặc retry nội bộ) để không sập cả pipeline
+                match client.fetch_klines(&sym, &interval_clone, limit).await {
+                    Ok(candles) => Some((sym, candles)),
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch klines for {}: {}", sym, e);
+                        None
+                    }
+                }
+            }));
+        }
+
+        let mut results = std::collections::HashMap::new();
+        for task in futures_util::future::join_all(tasks).await {
+            if let Ok(Some((sym, candles))) = task {
+                results.insert(sym, candles);
+            }
+        }
+
+        Ok(results)
+    }
 }

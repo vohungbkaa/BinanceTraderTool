@@ -37,25 +37,30 @@ impl MetadataManager {
     /// [SPEC 2.2] Xây dựng danh sách 100 đồng Altcoin tiềm năng nhất để đưa vào quét tín hiệu.
     /// Thuật toán này giúp bộ lọc thông minh hơn, tìm ra những đồng coin có dòng tiền thật và biên độ giá an toàn.
     ///
-    /// CHI TIẾT THUẬT TOÁN (BACKEND):
-    /// 1. Lọc sơ bộ: Chỉ lấy các cặp giao dịch Futures (PERPETUAL) đang hoạt động (TRADING). Bỏ qua Stablecoins, BTC, ETH.
-    /// 2. Lấy ra Top 150 theo Open Interest (OI): Mục đích là để loại bỏ các đồng coin có Volume ảo (bị làm giá) trước khi chấm điểm. Chỉ những coin có tiền thật đang giữ lệnh mới được chọn.
-    /// 3. Xác định Min/Max: Tìm giá trị nhỏ nhất và lớn nhất trong danh sách cho 4 tiêu chí: Volume, Open Interest (OI), Độ biến động (ATR), và Funding Rate tuyệt đối.
-    /// 4. Chuẩn hóa Min-Max (Đưa về thang điểm 0 - 100):
-    ///    - Điểm Volume & Điểm OI: Tính theo tỉ lệ thuận `(Value - Min) / (Max - Min) * 100`. Thanh khoản và dòng tiền càng lớn thì điểm càng cao.
-    ///    - Điểm Biến động (ATR): Tính theo tỉ lệ nghịch `100 - ((Value - Min) / (Max - Min) * 100)`. Điểm cao nhất dành cho các đồng coin đang tích lũy, biên độ nén lại, nhằm tránh nhảy vào các coin đã bay quá mạnh dễ dính quét Stoploss.
-    ///    - Điểm Funding Rate: Tính theo tỉ lệ nghịch `100 - ((|Funding| - Min) / (Max - Min) * 100)`. Điểm cao nhất dành cho các đồng coin có Funding Rate xoay quanh mức 0 (thể hiện tâm lý mua/bán đang cân bằng, ít rủi ro thanh lý hàng loạt).
-    /// 5. Tính điểm tổng hợp (Composite Score 0-100) dựa trên trọng số:
-    ///    `40% Điểm Volume + 30% Điểm OI + 20% Điểm Biến động + 10% Điểm Funding`.
-    /// 6. Sắp xếp giảm dần theo điểm tổng hợp và trả về danh sách (Mặc định lấy 100 coin tốt nhất).
-    ///
-    /// GHI CHÚ GIAO DIỆN QUẢN TRỊ (ADMIN UI):
-    /// - Cột "Hạng (Rank)" đã được thay bằng "Điểm Tổng Hợp (Composite Score)".
-    /// - Ngay dưới mỗi thông số của coin sẽ hiển thị rõ "Score: X" (thang 0-100) để người dùng dễ dàng hiểu tại sao đồng coin này lại được chọn vào Top.
-    /// - Có chú thích rõ ràng: Điểm cao ở mức Biến động (ATR) nghĩa là giá đang nén; Điểm cao ở Funding nghĩa là thị trường đang cân bằng.
+    /// CHI TIẾT THUẬT TOÁN (BACKEND - ADVANCED QUANT MODEL):
+    /// 1. Lọc sơ bộ: Chỉ lấy hợp đồng PERPETUAL & trạng thái TRADING. Bỏ qua Stablecoins, BTC, ETH.
+    /// 2. Top Volume & Top OI: Lấy Top 200 Volume, sau đó cắt lấy Top 150 OI để loại bỏ wash trading.
+    /// 3. Tính toán Điểm Thành Phần (0 - 100):
+    ///    - Điểm Volume & OI: Sử dụng Logarit tự nhiên `ln(value + 1)` trước khi Min-Max Normalization để tránh bị Outlier (DOGE, XRP) bóp méo phân phối.
+    ///    - Điểm Biến động (ATR Sweet Spot): Áp dụng phân phối hình chuông. Vùng lý tưởng (3% - 8%) đạt 100 điểm. Dưới 2% (chết lâm sàng) hoặc trên 15% (quá nóng) sẽ bị trừ điểm nặng.
+    ///    - Điểm Funding Rate (Threshold): Dưới 0.01% đạt 100 điểm tuyệt đối. Từ 0.01% đến 0.03% giảm dần về 0. Cực đoan > 0.03% nhận 0 điểm để tránh rủi ro Squeeze.
+    /// 4. Tính điểm tổng hợp (Composite Score 0-100) dựa trên trọng số:
+    ///    `40% Vol + 30% OI + 20% ATR + 10% Funding`.
     pub async fn get_universe_candidates(&self) -> Result<Vec<UniverseCandidate>> {
-        info!("MetadataManager: Building Universe with Min-Max Normalized Composite Scoring...");
+        info!("MetadataManager: Building Universe with Advanced Quant Scoring...");
         let limit = crate::core::config::AppConfig::load().altcoin_count;
+
+        // Constants for Scoring Logic (Can be moved to AppConfig later)
+        const INITIAL_UNIVERSE_LIMIT: usize = 300;
+        const OI_FILTER_LIMIT: usize = 150;
+        
+        const ATR_LOW_THRESH: f64 = 0.02;     // 2%
+        const ATR_SWEET_MIN: f64 = 0.02;      // 2%
+        const ATR_SWEET_MAX: f64 = 0.08;      // 8%
+        const ATR_HIGH_THRESH: f64 = 0.15;    // 15%
+        
+        const FUNDING_SAFE_THRESH: f64 = 0.0001;  // 0.01%
+        const FUNDING_RISK_THRESH: f64 = 0.0003;  // 0.03%
 
         // 1. Lọc Metadata từ Exchange Info (Chỉ lấy PERPETUAL & TRADING)
         let exchange_info = self.rest_client.fetch_exchange_info().await?;
@@ -71,14 +76,13 @@ impl MetadataManager {
             }
         }
 
-        // 2. Fetch 24h Tickers để lấy Volume và Proxy Volatility (ATR%)
+        // 2. Fetch 24h Tickers để lấy Volume, Price Change và Last Price
         let tickers = self.rest_client.fetch_24h_tickers().await?;
         
         #[derive(Clone)]
         struct RawData {
             symbol: String,
             vol: f64,
-            volatility: f64,
             p_change: f64,
             last_price: f64,
         }
@@ -98,24 +102,19 @@ impl MetadataManager {
                 return None;
             }
 
-            let vol = t["quoteVolume"].as_str()?.parse::<f64>().unwrap_or(0.0);
-            let high = t["highPrice"].as_str()?.parse::<f64>().unwrap_or(0.0);
-            let low = t["lowPrice"].as_str()?.parse::<f64>().unwrap_or(0.0);
-            let open = t["openPrice"].as_str()?.parse::<f64>().unwrap_or(0.0);
-            let p_change = t["priceChangePercent"].as_str()?.parse::<f64>().unwrap_or(0.0);
-            let last_price = t["lastPrice"].as_str()?.parse::<f64>().unwrap_or(0.0);
+            // Safe parsing using and_then and ok()
+            let vol = t["quoteVolume"].as_str().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            let p_change = t["priceChangePercent"].as_str().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            let last_price = t["lastPrice"].as_str().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
             
-            // Volatility Proxy (ATR% estimate) = (High - Low) / Open
-            let volatility = if open > 0.0 { (high - low) / open } else { 0.0 };
-
-            Some(RawData { symbol, vol, volatility, p_change, last_price })
+            Some(RawData { symbol, vol, p_change, last_price })
         }).collect();
 
-        // 3. Sort by Volume & take Top 200 (Initial broad filter)
+        // 3. Sort by Volume & take Top 300 (Wider initial filter to not miss high OI / low Vol coins)
         raw_candidates.sort_by(|a, b| b.vol.partial_cmp(&a.vol).unwrap());
-        raw_candidates.truncate(200);
+        raw_candidates.truncate(INITIAL_UNIVERSE_LIMIT);
 
-        let top_200_symbols: Vec<String> = raw_candidates.iter().map(|c| c.symbol.clone()).collect();
+        let top_symbols: Vec<String> = raw_candidates.iter().map(|c| c.symbol.clone()).collect();
 
         // 4. Fetch Premium Index (Funding Rate)
         let mut funding_map = HashMap::new();
@@ -129,18 +128,56 @@ impl MetadataManager {
             }
         }
 
-        // 5. Fetch Open Interest (Parallel)
-        let oi_map = self.rest_client.fetch_open_interest_bulk(&top_200_symbols).await?;
+        // 5. Fetch Open Interest (Parallel bulk fetch for the broader universe)
+        let oi_map = self.rest_client.fetch_open_interest_bulk(&top_symbols).await?;
 
-        // 6. Merge Data & Filter Top 150 by OI (Tránh Wash Trading)
+        // 6. Fetch Historical Klines (Parallel) to calculate True ATR (14 periods of 1D)
+        // We fetch 15 candles to calculate True Range properly (needs previous close)
+        info!("Fetching historical 1D klines for True ATR calculation...");
+        let klines_map = self.rest_client.fetch_klines_bulk(&top_symbols, "1d", 15).await?;
+        
+        let mut atr_map = HashMap::new();
+        for (sym, candles) in klines_map {
+            if candles.len() < 14 {
+                atr_map.insert(sym, 0.0); // Not enough data
+                continue;
+            }
+            
+            let mut tr_sum = 0.0;
+            let mut valid_tr_count = 0;
+            
+            for i in 1..candles.len() {
+                let current = &candles[i];
+                let prev = &candles[i - 1];
+                
+                let h_l = current.high - current.low;
+                let h_pc = (current.high - prev.close).abs();
+                let l_pc = (current.low - prev.close).abs();
+                
+                let tr = h_l.max(h_pc).max(l_pc);
+                
+                // Cần chuẩn hóa True Range thành % (ATR Percentage) so với giá Close hiện tại để so sánh giữa các coin
+                if current.close > 0.0 {
+                    tr_sum += tr / current.close;
+                    valid_tr_count += 1;
+                }
+            }
+            
+            let atr_pct = if valid_tr_count > 0 { tr_sum / valid_tr_count as f64 } else { 0.0 };
+            atr_map.insert(sym, atr_pct);
+        }
+
+        // 7. Merge Data & Filter Top 150 by OI (Tránh Wash Trading)
         let mut candidates: Vec<UniverseCandidate> = raw_candidates.into_iter().map(|r| {
             let open_interest = *oi_map.get(&r.symbol).unwrap_or(&0.0);
             let funding_rate_abs = *funding_map.get(&r.symbol).unwrap_or(&0.0);
+            let volatility = *atr_map.get(&r.symbol).unwrap_or(&0.0); // True ATR%
+            
             UniverseCandidate {
                 symbol: r.symbol,
                 quote_volume: r.vol,
                 open_interest,
-                volatility: r.volatility,
+                volatility,
                 funding_rate_abs,
                 vol_score: 0.0, oi_score: 0.0, atr_score: 0.0, fund_score: 0.0, composite_score: 0.0,
                 price_change_percent: r.p_change,
@@ -149,48 +186,67 @@ impl MetadataManager {
         }).collect();
 
         candidates.sort_by(|a, b| b.open_interest.partial_cmp(&a.open_interest).unwrap());
-        candidates.truncate(150);
+        candidates.truncate(OI_FILTER_LIMIT);
 
-        // 7. Calculate Min-Max Normalization (0 - 100)
-        let min_vol = candidates.iter().map(|c| c.quote_volume).fold(f64::INFINITY, f64::min);
-        let max_vol = candidates.iter().map(|c| c.quote_volume).fold(0.0, f64::max);
+        // 7. Advanced Scoring Logic
         
-        let min_oi = candidates.iter().map(|c| c.open_interest).fold(f64::INFINITY, f64::min);
-        let max_oi = candidates.iter().map(|c| c.open_interest).fold(0.0, f64::max);
+        // Logarithmic transformation for Volume and OI
+        let log_vols: Vec<f64> = candidates.iter().map(|c| (c.quote_volume + 1.0).ln()).collect();
+        let log_ois: Vec<f64> = candidates.iter().map(|c| (c.open_interest + 1.0).ln()).collect();
         
-        let min_atr = candidates.iter().map(|c| c.volatility).fold(f64::INFINITY, f64::min);
-        let max_atr = candidates.iter().map(|c| c.volatility).fold(0.0, f64::max);
+        let min_log_vol = log_vols.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max_log_vol = log_vols.iter().fold(0.0f64, |a, &b| a.max(b));
         
-        let min_fund = candidates.iter().map(|c| c.funding_rate_abs).fold(f64::INFINITY, f64::min);
-        let max_fund = candidates.iter().map(|c| c.funding_rate_abs).fold(0.0, f64::max);
+        let min_log_oi = log_ois.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max_log_oi = log_ois.iter().fold(0.0f64, |a, &b| a.max(b));
 
-        // Helper function for Min-Max 0-100 (Safe division)
+        // Safely normalize avoiding division by zero
         let normalize = |val: f64, min: f64, max: f64| -> f64 {
-            if max == min { 100.0 } else { ((val - min) / (max - min)) * 100.0 }
+            if (max - min).abs() < f64::EPSILON { 
+                50.0 // Return neutral score if all values are identical
+            } else { 
+                ((val - min) / (max - min)) * 100.0 
+            }
         };
 
-        // 8. Apply Scores & Calculate Composite
-        for c in candidates.iter_mut() {
-            // Tỷ lệ thuận (Cao là tốt)
-            c.vol_score = normalize(c.quote_volume, min_vol, max_vol);
-            c.oi_score = normalize(c.open_interest, min_oi, max_oi);
+        for (i, c) in candidates.iter_mut().enumerate() {
+            // A. Log-Normalized Volume & OI Scores (40% & 30%)
+            c.vol_score = normalize(log_vols[i], min_log_vol, max_log_vol);
+            c.oi_score = normalize(log_ois[i], min_log_oi, max_log_oi);
             
-            // Tỷ lệ nghịch (Thấp là tốt -> Lấy 100 - giá trị chuẩn hóa)
-            // ATR thấp = Nén biến động (Sweet spot); Funding gần 0 = Cân bằng (Tránh Squeeze)
-            c.atr_score = 100.0 - normalize(c.volatility, min_atr, max_atr);
-            c.fund_score = 100.0 - normalize(c.funding_rate_abs, min_fund, max_fund);
+            // B. ATR Sweet Spot Logic (20%)
+            let v = c.volatility;
+            c.atr_score = if v < ATR_LOW_THRESH {
+                (v / ATR_LOW_THRESH) * 100.0
+            } else if v <= ATR_SWEET_MAX {
+                100.0
+            } else if v <= ATR_HIGH_THRESH {
+                100.0 - ((v - ATR_SWEET_MAX) / (ATR_HIGH_THRESH - ATR_SWEET_MAX)) * 100.0
+            } else {
+                0.0
+            };
 
-            // Composite Score = 40% Vol + 30% OI + 20% ATR (Nén) + 10% Fund (Cân bằng)
+            // C. Funding Rate Threshold Logic (10%)
+            let f = c.funding_rate_abs;
+            c.fund_score = if f <= FUNDING_SAFE_THRESH {
+                100.0
+            } else if f <= FUNDING_RISK_THRESH {
+                100.0 - ((f - FUNDING_SAFE_THRESH) / (FUNDING_RISK_THRESH - FUNDING_SAFE_THRESH)) * 100.0
+            } else {
+                0.0
+            };
+
+            // Composite Score
             c.composite_score = (c.vol_score * 0.4) 
                               + (c.oi_score * 0.3) 
                               + (c.atr_score * 0.2) 
                               + (c.fund_score * 0.1);
         }
 
-        // 9. Sort by Composite Score Descending (Highest Score is Best)
+        // 8. Sort by Composite Score Descending (Highest Score is Best)
         candidates.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap());
 
-        // 10. Truncate to Final Target (Top 100)
+        // 9. Truncate to Final Target (Top 100)
         candidates.truncate(limit);
 
         Ok(candidates)
