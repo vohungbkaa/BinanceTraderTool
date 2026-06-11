@@ -5,15 +5,17 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use std::time::Duration;
 use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-use super::models::{Candle, NormalizedCandleData, Indicators, MarketIndices, Microstructure, MacroEvents, CandleMetadata};
+use super::models::{Candle, NormalizedCandleData};
 use super::events::MarketEvent;
 
 // Base endpoint cho phép gửi payload SUBSCRIBE (Sử dụng Combined Stream thuộc /market)
 const BINANCE_WS_BASE_URL: &str = "wss://fstream.binance.com/market/stream?streams=";
 
 pub struct BinanceWsClient {
-    symbols: HashSet<String>,
+    symbols: Arc<RwLock<HashSet<String>>>,
     timeframes: Vec<String>,
     event_tx: mpsc::Sender<MarketEvent>,
 }
@@ -27,22 +29,25 @@ impl BinanceWsClient {
         let timeframes = config.timeframes;
 
         Self { 
-            symbols: HashSet::new(),
+            symbols: Arc::new(RwLock::new(HashSet::new())),
             timeframes,
             event_tx 
         }
     }
 
-    pub fn update_symbols(&mut self, symbols: Vec<String>) {
-        self.symbols = symbols.into_iter()
+    /// Cập nhật danh sách symbols mà không cần Mutex bên ngoài
+    pub async fn update_symbols(&self, symbols: Vec<String>) {
+        let mut syms = self.symbols.write().await;
+        *syms = symbols.into_iter()
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
     }
 
-    fn get_all_streams(&self) -> Vec<String> {
+    async fn get_all_streams(&self) -> Vec<String> {
         let mut streams = Vec::new();
-        for symbol in &self.symbols {
+        let syms = self.symbols.read().await;
+        for symbol in syms.iter() {
             let sym_lower = symbol.to_lowercase();
             for tf in &self.timeframes {
                 streams.push(format!("{}@kline_{}", sym_lower, tf));
@@ -57,8 +62,6 @@ impl BinanceWsClient {
     }
 
     pub async fn run(&self) -> Result<()> {
-        let all_streams = self.get_all_streams();
-        
         // Mở kết nối với 1 stream mồi để Binance xác nhận đây là kết nối hợp lệ thuộc nhánh /market
         let initial_stream = "btcusdt@markPrice"; 
         let url = format!("{}{}", BINANCE_WS_BASE_URL, initial_stream);
@@ -72,7 +75,7 @@ impl BinanceWsClient {
                     let (mut write, mut read) = ws_stream.split();
 
                     // Gửi payload SUBSCRIBE với danh sách stream đã chia nhỏ để tránh Limit của Binance
-                    let all_streams = self.get_all_streams();
+                    let all_streams = self.get_all_streams().await;
                     tracing::info!("[WS] Registering {} streams dynamically...", all_streams.len());
 
                     let mut req_id = 1;
@@ -87,7 +90,7 @@ impl BinanceWsClient {
                             tracing::error!("[WS] Failed to send SUBSCRIBE payload: {}", e);
                         }
                         req_id += 1;
-                        tokio::time::sleep(Duration::from_millis(500)).await; // Tránh rate limit của WebSocket
+                        tokio::time::sleep(Duration::from_millis(500)).await; 
                     }
 
                     // 1. Giới hạn 24 giờ của Binance
@@ -105,14 +108,10 @@ impl BinanceWsClient {
                                 self.handle_message(text.as_str()).await;
                             }
                             Ok(Some(Ok(Message::Ping(ping_data)))) => {
-                                // Mặc dù tungstenite tự phản hồi Pong, nhưng ta explicit send Pong để debug và chắc chắn 100%
                                 tracing::debug!("[WS] Received Ping from Binance, sending explicit Pong.");
                                 if let Err(e) = write.send(Message::Pong(ping_data)).await {
                                     tracing::error!("[WS] Failed to send Pong: {}", e);
                                 }
-                            }
-                            Ok(Some(Ok(Message::Pong(_)))) => {
-                                // Bỏ qua
                             }
                             Ok(Some(Err(e))) => {
                                 tracing::error!("[WS] Read error: {}", e);
@@ -123,7 +122,7 @@ impl BinanceWsClient {
                                 break;
                             }
                             Err(_) => {
-                                tracing::warn!("[WS] Connection timed out (No data for 60s). Likely OS sleep/Network drop.");
+                                tracing::warn!("[WS] Connection timed out (No data for 60s).");
                                 break;
                             }
                             _ => {}
@@ -152,11 +151,10 @@ impl BinanceWsClient {
             let data = v.get("data").unwrap_or(&v);
 
             if data["e"] == "kline" {
-                if let Some(normalized) = self.parse_kline(data.clone()) {
+                if let Some(normalized) = self.parse_kline(data.clone()).await {
                     let k = &data["k"];
                     let is_closed = k["x"].as_bool().unwrap_or(false);
 
-                    // Log nhẹ để xác nhận giá nhảy
                     if is_closed {
                          tracing::info!("[WS KLINE CLOSED] {} | {} | Price: {} | Vol: {}", 
                             normalized.candle.symbol, 
@@ -164,9 +162,6 @@ impl BinanceWsClient {
                             normalized.candle.close,
                             normalized.candle.volume
                         );
-                    } else {
-                        // Bỏ comment dòng dưới nếu muốn thấy live tick từng giây
-                        // println!("[WS KLINE UPDATE] {} | {} | Price: {}", normalized.candle.symbol, normalized.candle.timeframe, normalized.candle.close);
                     }
                     
                     let event = if is_closed {
@@ -223,10 +218,10 @@ impl BinanceWsClient {
         }
     }
 
-    pub fn parse_kline(&self, v: Value) -> Option<NormalizedCandleData> {
+    pub async fn parse_kline(&self, v: Value) -> Option<NormalizedCandleData> {
         let symbol = v["s"].as_str()?.to_string();
         let k = &v["k"];
-        let candle = Candle {
+        let candle = super::models::Candle {
             symbol, timeframe: k["i"].as_str()?.to_string(),
             open_time: k["t"].as_i64()?, close_time: k["T"].as_i64()?,
             open: k["o"].as_str()?.parse().unwrap_or(0.0),

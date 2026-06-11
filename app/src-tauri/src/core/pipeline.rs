@@ -22,13 +22,13 @@ use crate::engine::scanner::{ScannerEngine, ScannerPayload};
 pub struct DataPipeline {
     market_event_rx: mpsc::Receiver<MarketEvent>,
     system_event_rx: mpsc::Receiver<SystemEvent>,
-    ws_client: Arc<Mutex<BinanceWsClient>>,
+    ws_client: Arc<BinanceWsClient>,
     rest_client: BinanceRestClient,
     db: Arc<Database>,
     global_event_tx: broadcast::Sender<MarketEvent>,
     indicator_engine: Arc<Mutex<IndicatorEngine>>, 
     risk_manager: Arc<Mutex<RiskManager>>,
-    metadata_manager: MetadataManager,
+    metadata_manager: Arc<MetadataManager>,
     breadth_engine: Arc<Mutex<BreadthEngine>>,
     scanner_engine: ScannerEngine,
     symbols: Vec<String>,
@@ -49,21 +49,21 @@ impl DataPipeline {
         let (system_tx, system_rx) = mpsc::channel(100);
 
         let rest_client = BinanceRestClient::new();
-        let mut ws_client = BinanceWsClient::new(market_tx, system_tx);
-        ws_client.update_symbols(symbols.clone());
+        let ws_client = BinanceWsClient::new(market_tx, system_tx);
+        // Initial symbols update handled below
 
         let indicator_engine = Arc::new(Mutex::new(IndicatorEngine::new()));
 
         Self {
             market_event_rx: market_rx,
             system_event_rx: system_rx,
-            ws_client: Arc::new(Mutex::new(ws_client)),
+            ws_client: Arc::new(ws_client),
             rest_client: rest_client.clone(),
             db: db.clone(),
             global_event_tx,
             indicator_engine: indicator_engine.clone(),
             risk_manager: Arc::new(Mutex::new(RiskManager::new())),
-            metadata_manager: MetadataManager::new(rest_client.clone()),
+            metadata_manager: Arc::new(MetadataManager::new(rest_client.clone())),
             breadth_engine: Arc::new(Mutex::new(BreadthEngine::new(rest_client.clone(), db.clone(), app_handle.clone()))),
             scanner_engine: ScannerEngine::new(rest_client, indicator_engine),
             symbols,
@@ -75,6 +75,13 @@ impl DataPipeline {
     /// Kích hoạt chu kỳ sống của Pipeline: Đồng bộ Scanning Universe, nạp dữ liệu lịch sử (Indicator Priming) và thực thi vòng lặp điều phối chính.
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting Data Pipeline (Phase 0)...");
+        
+        // Phát tín hiệu khởi tạo ngay lập tức để UI chuyển trạng thái
+        let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
+            step: "METADATA".to_string(),
+            progress: 5.0,
+            message: "System engine starting...".to_string(),
+        });
 
         // 1. [SPEC 2.2] Thiết lập Scanning Universe (Top 100 Altcoins) và xác lập baseline Độ rộng thị trường (Market Breadth) để định danh Market Regime.
         self.sync_metadata_and_breadth().await?;
@@ -98,14 +105,19 @@ impl DataPipeline {
 
         // 4. Worker Market Universe: Tự động cập nhật danh sách Altcoin dẫn dắt dòng tiền (Top 100) và tái cấu trúc Market Breadth (1h/lần).
         let breadth_engine_clone = Arc::clone(&self.breadth_engine);
-        let metadata_manager_clone = MetadataManager::new(self.rest_client.clone());
+        let metadata_manager_clone = Arc::clone(&self.metadata_manager);
+        let db_clone_sync = Arc::clone(&self.db);
         let risk_manager_for_total3 = Arc::clone(&self.risk_manager);
+        let app_handle_clone = self.app_handle.clone();
 
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
                 info!("Scheduled sync: Updating Top 100 Symbols and Market Breadth...");
-                if let Ok(top_100) = metadata_manager_clone.get_top_altcoins().await {
+                if let Ok(candidates) = metadata_manager_clone.get_top_altcoins(None).await {
+                    let _ = app_handle_clone.emit("market-event", &MarketEvent::UniverseUpdated(candidates.clone()));
+                    let _ = db_clone_sync.save_universe_candidates(&candidates).await;
+                    let top_100: Vec<String> = candidates.into_iter().map(|c| c.symbol).collect();
                     let breadth_ema50 = {
                         let mut engine = breadth_engine_clone.lock().await;
                         let _ = engine.update_breadth(&top_100).await;
@@ -129,8 +141,7 @@ impl DataPipeline {
         // 5. Duy trì kết nối WebSocket thời gian thực (TCP stream) để nhận biến động Orderflow và Price Action.
         let ws_client_clone = Arc::clone(&self.ws_client);
         tokio::spawn(async move {
-            let mut client = ws_client_clone.lock().await;
-            if let Err(e) = client.run().await {
+            if let Err(e) = ws_client_clone.run().await {
                 error!("WebSocket client stopped with error: {}", e);
             }
         });
@@ -163,7 +174,10 @@ impl DataPipeline {
                                 info!("Phase 2: Gateway Open & Cooldown finished. Triggering real Altcoin Scan...");
                                 *last_scan = now;
 
-                                if let Ok(top_altcoins) = self.metadata_manager.get_top_altcoins().await {
+                                if let Ok(candidates) = self.metadata_manager.get_top_altcoins(None).await {
+                                    let _ = self.app_handle.emit("market-event", &MarketEvent::UniverseUpdated(candidates.clone()));
+                                    let _ = self.db.save_universe_candidates(&candidates).await;
+                                    let top_altcoins: Vec<String> = candidates.into_iter().map(|c| c.symbol).collect();
                                     // Fetch bulk 24h tickers để tính toán biến động rolling của toàn bộ Universe.
                                     let tickers_24h = match self.rest_client.fetch_24h_tickers().await {
                                         Ok(t) => t,
@@ -255,18 +269,17 @@ impl DataPipeline {
 
     /// Lọc danh sách Top 100 Altcoin có thanh khoản cao nhất và xác lập baseline Độ rộng thị trường (Bullish/Bearish Regime).
     async fn sync_metadata_and_breadth(&mut self) -> Result<()> {
-        let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
-            step: "METADATA".to_string(),
-            progress: 10.0,
-            message: "Filtering top 100 high-quality altcoins...".to_string(),
-        });
+        info!("[PIPELINE] Starting sync_metadata_and_breadth...");
 
         // Xác định Scanning Universe dựa trên biến số Volume (Dòng tiền) và Vốn hóa.
-        let top_alts = self.metadata_manager.get_top_altcoins().await?;
+        let candidates = self.metadata_manager.get_top_altcoins(Some(&self.app_handle)).await?;
+        let _ = self.app_handle.emit("market-event", &MarketEvent::UniverseUpdated(candidates.clone()));
+        let _ = self.db.save_universe_candidates(&candidates).await;
+        let top_alts: Vec<String> = candidates.into_iter().map(|c| c.symbol).collect();
+        info!("[PIPELINE] METADATA sync complete. Selected {} coins.", top_alts.len());
 
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
-            step: "WEBSOCKET".to_string(),
-            progress: 30.0,
+            step: "WEBSOCKET".to_string(), progress: 30.0,
             message: "Initializing live stream connections...".to_string(),
         });
 
@@ -277,39 +290,41 @@ impl DataPipeline {
 
         // Cập nhật danh mục theo dõi cho WebSocket Worker.
         {
-            let mut ws = self.ws_client.lock().await;
-            ws.update_symbols(all_symbols);
+            info!("[PIPELINE] Updating WebSocket symbols...");
+            self.ws_client.update_symbols(all_symbols).await;
+            info!("[PIPELINE] WebSocket symbols updated.");
         }
 
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
-            step: "FUNDING".to_string(),
-            progress: 50.0,
-            message: "Fetching initial funding rates and open interest...".to_string(),
+            step: "FUNDING".to_string(), progress: 45.0,
+            message: "Fetching initial funding rates...".to_string(),
         });
 
         // Lấy Snapshot ban đầu về Funding Rates (Chi phí duy trì vị thế) để đánh giá Sentiment.
         if let Ok(premiums) = self.rest_client.fetch_premium_index().await {
+            info!("[PIPELINE] Fetching initial funding rates...");
             let mut risk = self.risk_manager.lock().await;
             for p in premiums {
                 let sym = p["symbol"].as_str().unwrap_or("").to_string();
                 let fr = p["lastFundingRate"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                 risk.symbol_funding.insert(sym, fr);
             }
+            info!("[PIPELINE] Funding rates synchronized.");
         }
 
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
-            step: "BREADTH".to_string(),
-            progress: 70.0,
-            message: "Calculating Market Breadth for top 100 altcoins...".to_string(),
+            step: "BREADTH".to_string(), progress: 55.0,
+            message: "Calculating Market Breadth...".to_string(),
         });
 
         // Tính toán tỷ lệ phân bổ giá so với EMA50 trong Universe để xác lập Bullish/Bearish Regime tổng thể.
-        let mut breadth = self.breadth_engine.lock().await;
-        let _ = breadth.update_breadth(&top_alts).await;
-        let ema50_val = breadth.market_breadth_ema50;
-
-        // Ước tính vector xu hướng TOTAL3 (Thị trường Altcoin chung).
         {
+            info!("[PIPELINE] Updating Market Breadth...");
+            let mut breadth = self.breadth_engine.lock().await;
+            let _ = breadth.update_breadth(&top_alts).await;
+            let ema50_val = breadth.market_breadth_ema50;
+
+            // Ước tính vector xu hướng TOTAL3 (Thị trường Altcoin chung).
             let mut risk = self.risk_manager.lock().await;
             use crate::core::models::TrendDirection;
             risk.total3_trend = if ema50_val > 55.0 {
@@ -319,14 +334,15 @@ impl DataPipeline {
             } else {
                 TrendDirection::Sideway
             };
+            info!("[PIPELINE] Market Breadth calculated: {:.2}%", ema50_val);
         }
 
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
-            step: "BREADTH_DONE".to_string(),
-            progress: 100.0,
+            step: "BREADTH_DONE".to_string(), progress: 70.0,
             message: "Market Breadth sync complete.".to_string(),
         });
 
+        info!("[PIPELINE] sync_metadata_and_breadth finished.");
         Ok(())
     }
 
@@ -334,8 +350,7 @@ impl DataPipeline {
     async fn perform_warmup(&mut self) -> Result<()> {
         info!("Performing high-performance incremental warm-up...");
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
-            step: "WARMUP_START".to_string(),
-            progress: 0.0,
+            step: "WARMUP_START".to_string(), progress: 70.0,
             message: "Starting high-speed data warm-up...".to_string(),
         });
 
@@ -400,7 +415,7 @@ impl DataPipeline {
 
                     // Report tiến độ khởi tạo hệ thống lên UI.
                     let done = completed_steps.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                    let progress = (done as f64 / total_steps as f64) * 100.0;
+                    let progress = 70.0 + (done as f64 / total_steps as f64) * 30.0;
                     let _ = app_handle.emit("market-event", &MarketEvent::SyncProgress {
                         step: "WARMUP".to_string(),
                         progress,
@@ -410,10 +425,42 @@ impl DataPipeline {
             }
         }
 
-        // Đợi ranh giới đồng bộ (Sync boundary) hoàn tất cho toàn bộ Universe.
+                // Đợi ranh giới đồng bộ (Sync boundary) hoàn tất cho toàn bộ Universe.
         for handle in join_handles {
             let _ = handle.await;
         }
+
+        // [QUAN TRỌNG] Kích hoạt phân tích Market Regime ban đầu ngay sau khi Warmup hoàn tất
+        // Điều này đảm bảo FLOW SCORE và các chỉ số bối cảnh được tính toán XONG trước khi tắt Loading Overlay.
+                // [QUAN TRỌNG] Kích hoạt phân tích Market Regime đa khung thời gian ngay sau khi Warmup hoàn tất
+        // Điều này đảm bảo FLOW SCORE và các chỉ số bối cảnh được tính toán CHUẨN XÁC trước khi tắt Loading Overlay.
+        info!("[PIPELINE] Warmup complete. Priming Market Regime Engine with BTC Multi-timeframe context...");
+        
+        let tfs = ["1d", "4h", "15m"];
+        for tf in tfs {
+            if let Ok(btc_data) = self.db.get_candles_with_indicators("BTCUSDT", tf, 1).await {
+                if let Some(mut data) = btc_data.into_iter().next() {
+                    let mut risk = self.risk_manager.lock().await;
+                    let breadth = self.breadth_engine.lock().await;
+                    
+                    let atr = data.indicators.atr14.unwrap_or(data.candle.close * 0.02);
+                    data.microstructure = risk.get_microstructure_risk(&data.candle.symbol, data.candle.close, atr);
+                    data.macro_events = risk.get_macro_events().await;
+                    
+                    let mut indices = risk.get_market_indices();
+                    indices.market_breadth_pct_above_ema50 = breadth.market_breadth_ema50;
+                    indices.market_breadth_pct_above_ema200 = breadth.market_breadth_ema200;
+                    data.market_indices = indices;
+                    
+                    // Phát sự kiện giả lập để cập nhật trạng thái nội tại của RegimeEngine
+                    let _ = self.global_event_tx.send(MarketEvent::CandleClosed(data));
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+        
+        // Đợi thêm một chút để đảm bảo UI nhận được tín hiệu RegimeUpdated cuối cùng từ nến 15m
+        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
 
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
             step: "WARMUP_DONE".to_string(),

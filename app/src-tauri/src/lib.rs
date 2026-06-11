@@ -54,7 +54,8 @@ pub fn run() {
             greet, 
             get_config,
             crate::core::admin::get_db_candles,
-            crate::core::admin::get_top_altcoins_metadata
+            crate::core::admin::get_top_altcoins_metadata,
+            crate::core::admin::get_stored_universe
         ])
         .setup(|app| {
             info!("Tauri application setup...");

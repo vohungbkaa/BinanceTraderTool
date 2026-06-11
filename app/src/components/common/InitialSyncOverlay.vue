@@ -2,9 +2,26 @@
 import { Loader2 } from '@lucide/vue';
 import type { SyncProgress } from '../../types/market';
 
-defineProps<{
+const props = defineProps<{
   sync: SyncProgress | null;
 }>();
+
+const steps = ['METADATA', 'WEBSOCKET', 'BREADTH', 'WARMUP'];
+
+const isStepDone = (step: string) => {
+  if (!props.sync) return false;
+  
+  const currentStep = props.sync.step;
+  const currentIdx = steps.indexOf(currentStep);
+  const targetIdx = steps.indexOf(step);
+  
+  // Các trường hợp đánh dấu là hoàn tất (màu xanh)
+  if (currentStep === 'WARMUP_DONE') return true;
+  if (currentStep === 'BREADTH_DONE' && targetIdx <= 2) return true;
+  
+  // Nếu bước hiện tại nằm sau bước đang xét, hoặc chính là bước đang xét
+  return currentIdx >= targetIdx;
+};
 </script>
 
 <template>
@@ -20,7 +37,7 @@ defineProps<{
 
         <div class="space-y-2">
           <h2 class="text-xl font-black uppercase tracking-tighter text-white">System Initializing</h2>
-          <p class="text-sm text-gray-400 font-medium h-4">{{ sync.message }}</p>
+          <p class="text-sm text-gray-400 font-medium h-4 truncate">{{ sync.message }}</p>
         </div>
 
         <div class="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
@@ -31,11 +48,11 @@ defineProps<{
         </div>
 
         <div class="grid grid-cols-4 gap-2">
-          <div v-for="step in ['METADATA', 'WEBSOCKET', 'BREADTH', 'WARMUP']" :key="step"
+          <div v-for="step in steps" :key="step"
                class="flex flex-col items-center gap-1">
             <div :class="[
                    'w-2 h-2 rounded-full',
-                   sync.step === step || (sync.step === 'WARMUP' && step !== 'WARMUP') || sync.step === 'WARMUP_DONE' || sync.step === 'BREADTH_DONE' ? 'bg-green-500' : 'bg-gray-700'
+                   isStepDone(step) ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]' : 'bg-gray-700'
                  ]"
                  class="transition-colors duration-500">
             </div>

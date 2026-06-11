@@ -16,6 +16,9 @@ pub enum MarketEvent {
     // Sự kiện mới: Danh sách quét Altcoin đã được cập nhật (Phase 2 phát ra)
     ScannerUpdated(ScannerPayload),
 
+    // Sự kiện mới: Danh sách Metadata của Top 100 Altcoins (Universe) đã được tính toán xong
+    UniverseUpdated(Vec<crate::core::metadata::UniverseCandidate>),
+
     DepthUpdated {
         symbol: String,
         is_liquidation: bool,

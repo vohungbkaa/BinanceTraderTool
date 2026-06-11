@@ -30,13 +30,13 @@ export const useMarketStore = defineStore('market', () => {
     const shortlist = ref<ScanCandidate[]>([]);
     const lastScanTime = ref<number>(0);
     const logs = ref<string[]>([]);
-    const syncProgress = ref<SyncProgress | null>({
-        step: 'START',
-        progress: 0,
-        message: 'System engine starting...'
-    });
+    const syncProgress = ref<SyncProgress | null>(null);
+    let isInitialized = false;
 
     async function init() {
+        if (isInitialized) return;
+        isInitialized = true;
+
         // Fetch config from backend
         try {
             const config: any = await invoke('get_config');

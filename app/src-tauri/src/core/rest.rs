@@ -99,11 +99,15 @@ impl BinanceRestClient {
     }
 
     /// Lấy Open Interest cho nhiều symbols đồng thời với giới hạn concurrency
-    pub async fn fetch_open_interest_bulk(&self, symbols: &[String]) -> Result<std::collections::HashMap<String, f64>> {
-        use futures_util::stream::StreamExt;
+    pub async fn fetch_open_interest_bulk<F>(&self, symbols: &[String], on_progress: F) -> Result<std::collections::HashMap<String, f64>> 
+    where F: Fn(f64, String) + Send + Sync + 'static {
         use std::sync::Arc;
         use tokio::sync::Semaphore;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
+        let total = symbols.len();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let on_progress = Arc::new(on_progress);
         let semaphore = Arc::new(Semaphore::new(20)); // Max 20 concurrent requests
         let mut tasks = Vec::new();
 
@@ -111,16 +115,22 @@ impl BinanceRestClient {
             let sym = symbol.clone();
             let client = self.clone();
             let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let completed = completed.clone();
+            let on_progress = on_progress.clone();
             
             tasks.push(tokio::spawn(async move {
                 let _permit = permit;
-                match client.fetch_open_interest(&sym).await {
+                let result = match client.fetch_open_interest(&sym).await {
                     Ok(val) => {
                         let oi = val["openInterest"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                        Some((sym, oi))
+                        Some((sym.clone(), oi))
                     }
                     Err(_) => None,
-                }
+                };
+                
+                let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                on_progress((done as f64 / total as f64) * 100.0, format!("Fetching OI: {}/{}", done, total));
+                result
             }));
         }
 
@@ -135,11 +145,16 @@ impl BinanceRestClient {
     }
 
     /// Lấy Open Interest 24h trước cho nhiều symbols đồng thời
-    pub async fn fetch_oi_hist_24h_bulk(&self, symbols: &[String]) -> Result<std::collections::HashMap<String, f64>> {
+    pub async fn fetch_oi_hist_24h_bulk<F>(&self, symbols: &[String], on_progress: F) -> Result<std::collections::HashMap<String, f64>> 
+    where F: Fn(f64, String) + Send + Sync + 'static {
         use std::sync::Arc;
         use tokio::sync::Semaphore;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let semaphore = Arc::new(Semaphore::new(10)); // Giới hạn 10 requests concurrent để tránh rate limit
+        let total = symbols.len();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let on_progress = Arc::new(on_progress);
+        let semaphore = Arc::new(Semaphore::new(10)); // Giới hạn 10 requests concurrent
         let mut tasks = Vec::new();
         let end_time = chrono::Utc::now().timestamp_millis() - 24 * 60 * 60 * 1000;
 
@@ -147,23 +162,28 @@ impl BinanceRestClient {
             let sym = symbol.clone();
             let client = self.clone();
             let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let completed = completed.clone();
+            let on_progress = on_progress.clone();
             
             tasks.push(tokio::spawn(async move {
                 let _permit = permit;
                 let url = format!("{}/futures/data/openInterestHist?symbol={}&period=5m&limit=1&endTime={}", client.base_url, sym, end_time);
                 
-                match client.client.get(&url).send().await {
+                let result = match client.client.get(&url).send().await {
                     Ok(res) => {
                         if let Ok(data) = res.json::<Vec<Value>>().await {
                             if let Some(first) = data.first() {
                                 let oi = first["sumOpenInterest"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                                return Some((sym, oi));
-                            }
-                        }
-                        None
+                                Some((sym.clone(), oi))
+                            } else { None }
+                        } else { None }
                     }
                     Err(_) => None,
-                }
+                };
+
+                let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                on_progress((done as f64 / total as f64) * 100.0, format!("Fetching Hist OI: {}/{}", done, total));
+                result
             }));
         }
 
@@ -178,11 +198,15 @@ impl BinanceRestClient {
     }
 
     /// Lấy nến lịch sử cho nhiều symbols đồng thời (Dùng để tính ATR chuẩn)
-    pub async fn fetch_klines_bulk(&self, symbols: &[String], interval: &str, limit: u32) -> Result<std::collections::HashMap<String, Vec<Candle>>> {
+    pub async fn fetch_klines_bulk<F>(&self, symbols: &[String], interval: &str, limit: u32, on_progress: F) -> Result<std::collections::HashMap<String, Vec<Candle>>> 
+    where F: Fn(f64, String) + Send + Sync + 'static {
         use std::sync::Arc;
         use tokio::sync::Semaphore;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        // Giới hạn requests concurrent để tránh IP Ban. Klines nặng hơn Open Interest nên dùng limit nhỏ hơn (10).
+        let total = symbols.len();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let on_progress = Arc::new(on_progress);
         let semaphore = Arc::new(Semaphore::new(10)); 
         let mut tasks = Vec::new();
 
@@ -191,17 +215,22 @@ impl BinanceRestClient {
             let interval_clone = interval.to_string();
             let client = self.clone();
             let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let completed = completed.clone();
+            let on_progress = on_progress.clone();
             
             tasks.push(tokio::spawn(async move {
                 let _permit = permit;
-                // Fetch klines có thể fail, ta bỏ qua lỗi (hoặc retry nội bộ) để không sập cả pipeline
-                match client.fetch_klines(&sym, &interval_clone, limit).await {
-                    Ok(candles) => Some((sym, candles)),
+                let result = match client.fetch_klines(&sym, &interval_clone, limit).await {
+                    Ok(candles) => Some((sym.clone(), candles)),
                     Err(e) => {
                         tracing::warn!("Failed to fetch klines for {}: {}", sym, e);
                         None
                     }
-                }
+                };
+
+                let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                on_progress((done as f64 / total as f64) * 100.0, format!("Fetching ATR: {}/{}", done, total));
+                result
             }));
         }
 

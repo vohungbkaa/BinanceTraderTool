@@ -80,7 +80,111 @@ impl Database {
         let _ = sqlx::query("ALTER TABLE closed_candles ADD COLUMN open_time_str TEXT;").execute(&self.pool).await;
         let _ = sqlx::query("ALTER TABLE closed_candles ADD COLUMN close_time_str TEXT;").execute(&self.pool).await;
 
+        // Bảng lưu danh sách 100 Altcoins tiềm năng nhất (Universe) đã qua bộ lọc Composite Score
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS universe_candidates (
+                symbol TEXT PRIMARY KEY,
+                quote_volume REAL NOT NULL,
+                volume_change_24h_pct REAL NOT NULL,
+                open_interest REAL NOT NULL,
+                oi_change_24h_pct REAL NOT NULL,
+                volatility REAL NOT NULL,
+                funding_rate REAL NOT NULL,
+                vol_score REAL NOT NULL,
+                vol_change_score REAL NOT NULL,
+                oi_score REAL NOT NULL,
+                oi_change_score REAL NOT NULL,
+                atr_score REAL NOT NULL,
+                fund_score REAL NOT NULL,
+                composite_score REAL NOT NULL,
+                price_change_percent REAL NOT NULL,
+                last_price REAL NOT NULL,
+                updated_at INTEGER NOT NULL
+            );"
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
+    }
+
+    /// Lưu trữ danh sách Universe Candidates vào DB
+    pub async fn save_universe_candidates(&self, candidates: &[crate::core::metadata::UniverseCandidate]) -> Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        
+        // Xóa dữ liệu cũ trước khi nạp mới
+        sqlx::query("DELETE FROM universe_candidates").execute(&self.pool).await?;
+
+        for c in candidates {
+            sqlx::query(
+                r#"
+                INSERT INTO universe_candidates (
+                    symbol, quote_volume, volume_change_24h_pct, open_interest, oi_change_24h_pct,
+                    volatility, funding_rate, vol_score, vol_change_score, oi_score,
+                    oi_change_score, atr_score, fund_score, composite_score,
+                    price_change_percent, last_price, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                "#
+            )
+            .bind(&c.symbol)
+            .bind(c.quote_volume)
+            .bind(c.volume_change_24h_pct)
+            .bind(c.open_interest)
+            .bind(c.oi_change_24h_pct)
+            .bind(c.volatility)
+            .bind(c.funding_rate)
+            .bind(c.vol_score)
+            .bind(c.vol_change_score)
+            .bind(c.oi_score)
+            .bind(c.oi_change_score)
+            .bind(c.atr_score)
+            .bind(c.fund_score)
+            .bind(c.composite_score)
+            .bind(c.price_change_percent)
+            .bind(c.last_price)
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Lấy danh sách Universe Candidates mới nhất từ DB
+    pub async fn get_stored_universe_candidates(&self) -> Result<Vec<crate::core::metadata::UniverseCandidate>> {
+        let rows = sqlx::query(
+            "SELECT symbol, quote_volume, volume_change_24h_pct, open_interest, oi_change_24h_pct,
+                    volatility, funding_rate, vol_score, vol_change_score, oi_score,
+                    oi_change_score, atr_score, fund_score, composite_score,
+                    price_change_percent, last_price 
+             FROM universe_candidates 
+             ORDER BY composite_score DESC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        use sqlx::Row;
+        let candidates = rows.into_iter().map(|r| {
+            crate::core::metadata::UniverseCandidate {
+                symbol: r.get(0),
+                quote_volume: r.get(1),
+                volume_change_24h_pct: r.get(2),
+                open_interest: r.get(3),
+                oi_change_24h_pct: r.get(4),
+                volatility: r.get(5),
+                funding_rate: r.get(6),
+                vol_score: r.get(7),
+                vol_change_score: r.get(8),
+                oi_score: r.get(9),
+                oi_change_score: r.get(10),
+                atr_score: r.get(11),
+                fund_score: r.get(12),
+                composite_score: r.get(13),
+                price_change_percent: r.get(14),
+                last_price: r.get(15),
+            }
+        }).collect();
+
+        Ok(candidates)
     }
 
     pub async fn insert_closed_candle(&self, data: &NormalizedCandleData) -> Result<()> {

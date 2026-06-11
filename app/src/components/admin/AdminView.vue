@@ -195,13 +195,23 @@ const filteredDbCandles = computed(() => {
   });
 });
 
-const loadTopAltcoins = async () => {
+const loadTopAltcoins = async (forceRefresh = false) => {
   isLoadingTop100.value = true;
   try {
-    const data = await invoke<UniverseCandidate[]>('get_top_altcoins_metadata');
-    topAltcoins.value = data;
+    if (forceRefresh) {
+      const data = await invoke<UniverseCandidate[]>("get_top_altcoins_metadata");
+      topAltcoins.value = data;
+    } else {
+      const data = await invoke<UniverseCandidate[]>("get_stored_universe");
+      if (data && data.length > 0) {
+        topAltcoins.value = data;
+      } else {
+        const freshData = await invoke<UniverseCandidate[]>("get_top_altcoins_metadata");
+        topAltcoins.value = freshData;
+      }
+    }
   } catch (error) {
-    console.error('Failed to load top altcoins metadata:', error);
+    console.error("Failed to load top altcoins metadata:", error);
   } finally {
     isLoadingTop100.value = false;
   }
@@ -303,9 +313,9 @@ onMounted(() => {
             placeholder="Global search..." 
             class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md focus:ring-blue-500 focus:border-blue-500 block w-48 p-1.5"
           >
-          <button @click="loadTopAltcoins" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm rounded border border-gray-700 flex items-center gap-2">
+          <button @click="loadTopAltcoins(true)" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm rounded border border-gray-700 flex items-center gap-2">
             <span v-if="isLoadingTop100">Loading...</span>
-            <span v-else>Refresh Data</span>
+            <span v-else>Force Refresh API</span>
           </button>
         </div>
       </div>

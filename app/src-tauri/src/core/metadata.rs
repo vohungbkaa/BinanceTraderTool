@@ -45,6 +45,7 @@ impl MetadataManager {
     }
 
     /// [SPEC 2.2] Xây dựng danh sách 100 đồng Altcoin tiềm năng nhất để đưa vào quét tín hiệu.
+    /// Thuật toán này giúp bộ lọc thông minh hơn, tìm ra những đồng coin có dòng tiền thật và biên độ giá an toàn.
     ///
     /// CHI TIẾT THUẬT TOÁN (BACKEND - ADVANCED QUANT MODEL v1.2):
     /// 1. Lọc sơ bộ: Chỉ lấy các cặp giao dịch Futures (PERPETUAL) đang hoạt động (TRADING). Bỏ qua Stablecoins, BTC, ETH.
@@ -56,19 +57,33 @@ impl MetadataManager {
     ///    - Điểm Funding Rate (Percentile): Loại bỏ 10% coin có Funding cao nhất và 10% thấp nhất (rủi ro Squeeze). 80% ở giữa nhận 100 điểm.
     /// 4. Tính điểm tổng hợp (Composite Score 0-100) dựa trên trọng số:
     ///    `25% Vol + 10% Vol_Growth + 20% OI + 15% OI_Growth + 20% ATR + 10% Funding`.
-    pub async fn get_universe_candidates(&self) -> Result<Vec<UniverseCandidate>> {
+    pub async fn get_universe_candidates(&self, app_handle: Option<&tauri::AppHandle>) -> Result<Vec<UniverseCandidate>> {
+        use crate::core::events::MarketEvent;
+        use tauri::Emitter;
+
         info!("MetadataManager: Building Universe with Advanced Quant Scoring (v1.2)...");
         let limit = crate::core::config::AppConfig::load().altcoin_count;
+
+        let emit_progress = |step: &str, progress: f64, msg: String| {
+            if let Some(handle) = app_handle {
+                let global_p = (progress / 100.0) * 25.0; // Phase METADATA chiếm 25% tổng
+                let _ = handle.emit("market-event", &MarketEvent::SyncProgress {
+                    step: step.to_string(),
+                    progress: global_p,
+                    message: msg,
+                });
+            }
+        };
 
         // Constants for Scoring Logic
         const INITIAL_UNIVERSE_LIMIT: usize = 300;
         const OI_FILTER_LIMIT: usize = 150;
-        
-        const ATR_SWEET_MIN: f64 = 0.02;      // 2%
-        const ATR_SWEET_MAX: f64 = 0.08;      // 8%
-        const ATR_HIGH_THRESH: f64 = 0.15;    // 15%
-        
-        const ATR_CACHE_TTL_MS: i64 = 4 * 60 * 60 * 1000; // Cache 4 giờ
+        const ATR_SWEET_MIN: f64 = 0.02; 
+        const ATR_SWEET_MAX: f64 = 0.08;
+        const ATR_HIGH_THRESH: f64 = 0.15;
+        const ATR_CACHE_TTL_MS: i64 = 4 * 60 * 60 * 1000;
+
+        emit_progress("METADATA", 10.0, "Fetching exchange information...".to_string());
 
         // 1. Lọc Metadata từ Exchange Info
         let exchange_info = self.rest_client.fetch_exchange_info().await?;
@@ -83,6 +98,8 @@ impl MetadataManager {
                 }
             }
         }
+
+        emit_progress("METADATA", 15.0, format!("Filtering {} perpetual symbols...", valid_symbols.len()));
 
         // 2. Fetch 24h Tickers
         let tickers = self.rest_client.fetch_24h_tickers().await?;
@@ -104,6 +121,8 @@ impl MetadataManager {
         raw_candidates.truncate(INITIAL_UNIVERSE_LIMIT);
         let top_symbols: Vec<String> = raw_candidates.iter().map(|c| c.symbol.clone()).collect();
 
+        emit_progress("METADATA", 20.0, format!("Selected top {} symbols by volume. Fetching OI data...", top_symbols.len()));
+
         // 4. Funding Map
         let mut funding_map = HashMap::new();
         if let Ok(premiums) = self.rest_client.fetch_premium_index().await {
@@ -115,8 +134,25 @@ impl MetadataManager {
         }
 
         // 5. OI Data
-        let oi_map = self.rest_client.fetch_open_interest_bulk(&top_symbols).await?;
-        let oi_hist_map = self.rest_client.fetch_oi_hist_24h_bulk(&top_symbols).await?;
+        let oi_map = if let Some(handle) = app_handle {
+            let handle_clone = handle.clone();
+            self.rest_client.fetch_open_interest_bulk(&top_symbols, move |p, m| {
+                let global_p = 5.0 + (p / 100.0) * 5.0; 
+                let _ = handle_clone.emit("market-event", &MarketEvent::SyncProgress { step: "METADATA".to_string(), progress: global_p, message: m });
+            }).await?
+        } else {
+            self.rest_client.fetch_open_interest_bulk(&top_symbols, |_, _| {}).await?
+        };
+
+        let oi_hist_map = if let Some(handle) = app_handle {
+            let handle_clone = handle.clone();
+            self.rest_client.fetch_oi_hist_24h_bulk(&top_symbols, move |p, m| {
+                let global_p = 10.0 + (p / 100.0) * 5.0; 
+                let _ = handle_clone.emit("market-event", &MarketEvent::SyncProgress { step: "METADATA".to_string(), progress: global_p, message: m });
+            }).await?
+        } else {
+            self.rest_client.fetch_oi_hist_24h_bulk(&top_symbols, |_, _| {}).await?
+        };
 
         // 6. ATR & Yesterday Vol Cache
         let now = chrono::Utc::now().timestamp_millis();
@@ -136,8 +172,19 @@ impl MetadataManager {
                 symbols_to_fetch_atr.push(sym.clone());
             }
         }
+
         if !symbols_to_fetch_atr.is_empty() {
-            if let Ok(klines_map) = self.rest_client.fetch_klines_bulk(&symbols_to_fetch_atr, "1d", 15).await {
+            let klines_res = if let Some(handle) = app_handle {
+                let handle_clone = handle.clone();
+                self.rest_client.fetch_klines_bulk(&symbols_to_fetch_atr, "1d", 15, move |p, m| {
+                    let global_p = 15.0 + (p / 100.0) * 8.0; 
+                    let _ = handle_clone.emit("market-event", &MarketEvent::SyncProgress { step: "METADATA".to_string(), progress: global_p, message: m });
+                }).await
+            } else {
+                self.rest_client.fetch_klines_bulk(&symbols_to_fetch_atr, "1d", 15, |_, _| {}).await
+            };
+
+            if let Ok(klines_map) = klines_res {
                 let mut cache_write = self.atr_cache.write().await;
                 for (sym, candles) in klines_map {
                     if candles.len() < 14 {
@@ -161,6 +208,8 @@ impl MetadataManager {
                 }
             }
         }
+
+        emit_progress("METADATA", 85.0, "Applying composite scoring and ranking...".to_string());
 
         // 7. Merge Candidates
         let mut candidates: Vec<UniverseCandidate> = raw_candidates.into_iter().map(|r| {
@@ -221,11 +270,15 @@ impl MetadataManager {
 
         candidates.sort_by(|a, b| b.composite_score.partial_cmp(&a.composite_score).unwrap_or(Ordering::Equal));
         candidates.truncate(limit);
+        
+        emit_progress("METADATA", 100.0, format!("Success! Filtering complete: {} coins selected.", candidates.len()));
+        
         Ok(candidates)
     }
 
-    pub async fn get_top_altcoins(&self) -> Result<Vec<String>> {
-        let candidates = self.get_universe_candidates().await?;
-        Ok(candidates.into_iter().map(|c| c.symbol).collect())
+    /// [SPEC 2.2] Trả về danh sách Tên Symbol cho Pipeline sử dụng
+    pub async fn get_top_altcoins(&self, app_handle: Option<&tauri::AppHandle>) -> Result<Vec<UniverseCandidate>> {
+        let candidates = self.get_universe_candidates(app_handle).await?;
+        Ok(candidates)
     }
 }
