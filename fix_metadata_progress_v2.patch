@@ -1,0 +1,43 @@
+--- app/src-tauri/src/core/metadata.rs
++++ app/src-tauri/src/core/metadata.rs
+@@ -64,9 +64,10 @@
+         let limit = crate::core::config::AppConfig::load().altcoin_count;
+ 
+         let emit_progress = |step: &str, progress: f64, msg: String| {
++            let global_p = (progress / 100.0) * 25.0; // Phase METADATA chiếm 25% tổng
+             let _ = app_handle.emit("market-event", &MarketEvent::SyncProgress {
+                 step: step.to_string(),
+-                progress,
++                progress: global_p,
+                 message: msg,
+             });
+         };
+@@ -133,13 +134,15 @@
+ 
+         // 5. OI Data
+         let app_handle_oi = app_handle.clone();
+         let oi_map = self.rest_client.fetch_open_interest_bulk(&top_symbols, move |p, m| {
+-            let _ = app_handle_oi.emit("market-event", &MarketEvent::SyncProgress { step: "METADATA".to_string(), progress: 20.0 + (p * 0.15), message: m });
++            let global_p = 5.0 + (p / 100.0) * 5.0; // 5% -> 10%
++            let _ = app_handle_oi.emit("market-event", &MarketEvent::SyncProgress { step: "METADATA".to_string(), progress: global_p, message: m });
+         }).await?;
+ 
+         let app_handle_oi_h = app_handle.clone();
+         let oi_hist_map = self.rest_client.fetch_oi_hist_24h_bulk(&top_symbols, move |p, m| {
+-            let _ = app_handle_oi_h.emit("market-event", &MarketEvent::SyncProgress { step: "METADATA".to_string(), progress: 35.0 + (p * 0.15), message: m });
++            let global_p = 10.0 + (p / 100.0) * 5.0; // 10% -> 15%
++            let _ = app_handle_oi_h.emit("market-event", &MarketEvent::SyncProgress { step: "METADATA".to_string(), progress: global_p, message: m });
+         }).await?;
+ 
+         // 6. ATR & Yesterday Vol Cache
+@@ -163,7 +166,8 @@
+ 
+         if !symbols_to_fetch_atr.is_empty() {
+             let app_handle_atr = app_handle.clone();
+             if let Ok(klines_map) = self.rest_client.fetch_klines_bulk(&symbols_to_fetch_atr, "1d", 15, move |p, m| {
+-                let _ = app_handle_atr.emit("market-event", &MarketEvent::SyncProgress { step: "METADATA".to_string(), progress: 50.0 + (p * 0.30), message: m });
++                let global_p = 15.0 + (p / 100.0) * 8.0; // 15% -> 23%
++                let _ = app_handle_atr.emit("market-event", &MarketEvent::SyncProgress { step: "METADATA".to_string(), progress: global_p, message: m });
+             }).await {
+                 let mut cache_write = self.atr_cache.write().await;
+                 for (sym, candles) in klines_map {
