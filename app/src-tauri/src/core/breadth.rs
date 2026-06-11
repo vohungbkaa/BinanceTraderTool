@@ -5,6 +5,7 @@ use tracing::{info, warn};
 use crate::core::indicators::SymbolIndicatorState;
 use crate::core::pipeline::timeframe_to_ms;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use tauri::AppHandle;
 use tauri::Emitter;
@@ -14,8 +15,9 @@ pub struct BreadthEngine {
     rest_client: BinanceRestClient,
     db: Arc<Database>,
     app_handle: AppHandle,
-    pub market_breadth_ema50: f64,
-    pub market_breadth_ema200: f64,
+    // Sử dụng Interior Mutability để không cần lock toàn bộ Engine khi await
+    pub market_breadth_ema50: Arc<RwLock<f64>>,
+    pub market_breadth_ema200: Arc<RwLock<f64>>,
 }
 
 impl BreadthEngine {
@@ -24,8 +26,8 @@ impl BreadthEngine {
             rest_client,
             db,
             app_handle,
-            market_breadth_ema50: 0.0,
-            market_breadth_ema200: 0.0,
+            market_breadth_ema50: Arc::new(RwLock::new(0.0)),
+            market_breadth_ema200: Arc::new(RwLock::new(0.0)),
         }
     }
 
@@ -139,8 +141,10 @@ impl BreadthEngine {
     }
 
     /// Cập nhật kết quả tính toán vào trạng thái nội tại (Yêu cầu Mutex Lock)
-    pub fn apply_results(&mut self, ema50: f64, ema200: f64) {
-        self.market_breadth_ema50 = ema50;
-        self.market_breadth_ema200 = ema200;
+    pub async fn apply_results(&self, ema50: f64, ema200: f64) {
+        let mut e50 = self.market_breadth_ema50.write().await;
+        let mut e200 = self.market_breadth_ema200.write().await;
+        *e50 = ema50;
+        *e200 = ema200;
     }
 }
