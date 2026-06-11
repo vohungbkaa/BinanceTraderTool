@@ -35,6 +35,8 @@ impl FormatTime for LocalTimer {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 1. [TRACING/LOGGING] Thiết lập hệ thống giám sát và nhật ký hoạt động.
+    // Dữ liệu log được lưu vào tập tin theo ngày tại thư mục ./logs và in ra Standard Output.
     let file_appender = tracing_appender::rolling::daily("./logs", "binance_bot.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     
@@ -44,19 +46,25 @@ pub fn run() {
         .with_writer(std::io::stdout.and(non_blocking))
         .init();
 
+    // 2. [APPLICATION BUILDER] Khởi tạo khung ứng dụng Tauri.
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Đăng ký các hàm xử lý (Handlers) cho phép Frontend Invoke trực tiếp vào Backend.
         .invoke_handler(tauri::generate_handler![greet, get_config])
         .setup(|app| {
             info!("Tauri application setup...");
             let app_handle = app.handle().clone();
 
+            // [ASYNC RUNTIME] Khởi tạo môi trường thực thi bất đồng bộ cho các logic nghiệp vụ.
+            // Các tác vụ này chạy độc lập với luồng xử lý giao diện (Main/UI Thread).
             tauri::async_runtime::spawn(async move {
-                // 1. Tạo Global Event Bus (Broadcast)
-                // Bus này cho phép nhiều module cùng gửi và nhận MarketEvent
+                
+                // 1. [GLOBAL EVENT BUS] Khởi tạo Broadcast Channel cho toàn hệ thống.
+                // Cho phép truyền tin theo mô hình Pub/Sub giữa các module độc lập.
                 let (global_tx, _) = broadcast::channel::<MarketEvent>(4096);
 
-                // 2. Khởi tạo Database
+                // 2. [PERSISTENCE LAYER] Khởi tạo kết nối cơ sở dữ liệu SQLite.
+                // Sử dụng Arc (Atomic Reference Count) để chia sẻ quyền truy cập DB an toàn qua các Thread.
                 let db_url = "sqlite://data.db?mode=rwc";
                 let db = match Database::new(db_url).await {
                     Ok(db) => Arc::new(db),
@@ -66,18 +74,19 @@ pub fn run() {
                     }
                 };
 
-                // 3. Khởi chạy Phase 1: Market Regime Engine (Background Task)
-                // Nó sẽ lắng nghe nến từ bus và phát lại kết quả bối cảnh lên bus
+                // 3. [PHASE 1] Market Regime Engine (Phân tích bối cảnh thị trường).
+                // Kích hoạt Engine dưới dạng tác vụ nền để lắng nghe sự kiện từ Event Bus.
+                // LƯU Ý: Phải khởi chạy Subscriber (Engine) trước khi Publisher (Pipeline) phát dữ liệu.
                 let mut regime_engine = MarketRegimeEngine::new();
-                let regime_rx = global_tx.subscribe();
-                let regime_tx = global_tx.clone();
+                let regime_rx = global_tx.subscribe(); 
+                let regime_tx = global_tx.clone();     
                 tokio::spawn(async move {
                     regime_engine.run(regime_rx, regime_tx).await;
                 });
 
-                // 4. Khởi chạy Phase 0: Data Pipeline (Background Task)
-                // [SPEC 2.1] Chỉ theo dõi BTCUSDT để xác định Market Regime (Bối cảnh chung)
-                // Các Altcoin khác sẽ được quét ở Phase 2 (Scanner)
+                // 4. [PHASE 0] Data Pipeline (Hệ thống tiếp nhận và điều phối dữ liệu).
+                // Đây là Ingestion Engine chính của hệ thống. Sử dụng await để chiếm dụng luồng hiện tại.
+                // Khi Pipeline hoạt động, dữ liệu từ sàn sẽ được nạp và phân phối lên Event Bus.
                 let initial_symbols = vec!["BTCUSDT".to_string()];
                 let mut pipeline = DataPipeline::new(initial_symbols, db, global_tx, app_handle);
                 

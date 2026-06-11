@@ -37,12 +37,15 @@ pub struct DataPipeline {
 }
 
 impl DataPipeline {
+    /// [CONSTRUCTOR] Khởi tạo thực thể DataPipeline.
+    /// Thiết lập các kết nối mạng, kênh truyền tin và các engine con.
     pub fn new(
         symbols: Vec<String>, 
         db: Arc<Database>, 
         global_event_tx: broadcast::Sender<MarketEvent>,
         app_handle: AppHandle,
     ) -> Self {
+        // Khởi tạo kênh truyền tin MPSC (Multi-Producer, Single-Consumer) cho sự kiện thị trường.
         let (market_tx, market_rx) = mpsc::channel(1000);
         let (system_tx, system_rx) = mpsc::channel(100);
 
@@ -70,30 +73,31 @@ impl DataPipeline {
         }
     }
 
+    /// [ORCHESTRATION] Khởi động luồng điều phối dữ liệu (Phase 0).
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting Data Pipeline (Phase 0)...");
 
-        // 1. [SPEC 2.2] Metadata Sync & Market Breadth Initial Calculation
+        // 1. [METADATA SYNC] Đồng bộ thông tin thị trường và tính Market Breadth ban đầu.
+        // Đây là bước thiết lập tham số môi trường trước khi tiếp nhận dữ liệu thực.
         self.sync_metadata_and_breadth().await?;
 
-        // 2. Intelligent Warm-up
+        // 2. [WARMUP] Tải dữ liệu lịch sử từ Database/API để làm đầy Cache chỉ báo.
+        // Đảm bảo các Technical Indicators có đủ tham số đầu vào ngay khi hệ thống chạy.
         self.perform_warmup().await?;
 
-        // 3. Start News/Risk Update loop (30 minutes interval)
+        // 3. [RISK UPDATE LOOP] Tác vụ nền cập nhật lịch sự kiện kinh tế (Mỗi 30 phút).
         let risk_manager_clone = Arc::clone(&self.risk_manager);
         tokio::spawn(async move {
             loop {
                 {
                     let risk = risk_manager_clone.lock().await;
-                    if let Err(e) = risk.update_economic_calendar().await {
-                        error!("Failed to update economic calendar: {}", e);
-                    }
+                    let _ = risk.update_economic_calendar().await;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1800)).await;
             }
         });
 
-        // 4. Start Metadata & Breadth Sync loop
+        // 4. [BACKGROUND SYNC] Cập nhật định kỳ Metadata và Market Breadth (Mỗi 1 tiếng).
         let breadth_engine_clone = Arc::clone(&self.breadth_engine);
         let metadata_manager_clone = MetadataManager::new(self.rest_client.clone());
         let risk_manager_for_total3 = Arc::clone(&self.risk_manager);
@@ -109,143 +113,54 @@ impl DataPipeline {
                         engine.market_breadth_ema50
                     };
                     
-                    // [SPEC 2.3] Cập nhật xu hướng TOTAL3 (Ước tính dựa trên Breadth)
                     let mut risk = risk_manager_for_total3.lock().await;
                     use crate::core::models::TrendDirection;
-                    risk.total3_trend = if breadth_ema50 > 55.0 { 
-                        TrendDirection::Up 
-                    } else if breadth_ema50 < 45.0 { 
-                        TrendDirection::Down 
-                    } else { 
-                        TrendDirection::Sideway 
-                    };
+                    risk.total3_trend = if breadth_ema50 > 55.0 { TrendDirection::Up } else if breadth_ema50 < 45.0 { TrendDirection::Down } else { TrendDirection::Sideway };
                 }
             }
         });
 
-        // 5. Start WebSocket client
+        // 5. [DATA INGESTION] Kích hoạt kết nối WebSocket nhận dữ liệu Realtime.
         let ws_client_clone = Arc::clone(&self.ws_client);
         tokio::spawn(async move {
             let mut client = ws_client_clone.lock().await;
             if let Err(e) = client.run().await {
-                error!("WebSocket client stopped with error: {}", e);
+                error!("WebSocket client stopped: {}", e);
             }
         });
 
-        // 6. Main event loop
+        // 6. [MAIN DISPATCH LOOP] Vòng lặp điều hướng sự kiện chính.
+        // Tiếp nhận dữ liệu từ WebSocket và lệnh điều khiển từ Phase 1 để kích hoạt Phase 2.
         let mut regime_rx = self.global_event_tx.subscribe();
         
         loop {
             tokio::select! {
+                // A. Xử lý dữ liệu thị trường trực tiếp (Nến, Giá, Thanh lý)
                 Some(market_event) = self.market_event_rx.recv() => {
                     self.handle_market_event(market_event).await;
                 }
-                Some(system_event) = self.system_event_rx.recv() => {
-                    self.handle_system_event(system_event).await;
-                }
+                // B. Lắng nghe cập nhật bối cảnh thị trường từ Regime Engine
                 Ok(global_event) = regime_rx.recv() => {
                     if let MarketEvent::RegimeUpdated(context) = global_event {
-                        // [QUAN TRỌNG] Phải forward tin này lên UI để Dashboard cập nhật trạng thái BLOCKED/ENABLED
+                        // Đồng bộ trạng thái hệ thống lên giao diện người dùng (UI)
                         let _ = self.app_handle.emit("market-event", &MarketEvent::RegimeUpdated(context.clone()));
 
+                        // Kiểm tra điều kiện Gatekeeper: Nếu Phase 1 cho phép -> Kích hoạt Phase 2 (Scanner)
                         if context.allow_alt_scan {
                             let now = chrono::Utc::now().timestamp();
                             let mut last_scan = self.last_scan_timestamp.lock().await;
                             
-                            // [THROTTLE] Chỉ cho phép quét tối đa 1 lần mỗi 15 phút (900 giây)
+                            // [THROTTLING] Kiểm soát tần suất quét để tối ưu hóa hiệu năng và Rate Limit.
                             if now - *last_scan >= 900 {
-                                info!("Phase 2: Gateway Open & Cooldown finished. Triggering real Altcoin Scan...");
                                 *last_scan = now;
-                                
-                                if let Ok(top_altcoins) = self.metadata_manager.get_top_altcoins().await {
-                                    // [FIX] Fetch bulk 24h ticker data once for all symbols to avoid rate limits
-                                    let tickers_24h = match self.rest_client.fetch_24h_tickers().await {
-                                        Ok(t) => t,
-                                        Err(e) => {
-                                            warn!("Failed to fetch 24h tickers: {}. Skipping scan.", e);
-                                            continue;
-                                        }
-                                    };
-
-                                    let snapshots = self.scanner_engine.fetch_real_snapshots(&top_altcoins, &tickers_24h, self.db.clone(), Arc::clone(&self.risk_manager)).await;
-                                    
-                                    // [FIX] Đồng bộ cách tính biến động BTCUSDT với Altcoin
-                                    // 1D: Lấy từ tickers_24h (Rolling 24h) thay vì nến ngày chưa đóng
-                                    let btc_change_1d = tickers_24h.iter()
-                                        .find(|t| t["symbol"].as_str() == Some("BTCUSDT"))
-                                        .and_then(|t| t["priceChangePercent"].as_str())
-                                        .and_then(|s| s.parse::<f64>().ok())
-                                        .unwrap_or(0.0);
-                                    
-                                    // 4H: Span 2 nến (4-8 tiếng) để tránh nhiễu do reset nến
-                                    let btc_4h = self.db.get_candles("BTCUSDT", "4h", 2).await.unwrap_or_default();
-                                    let btc_change_4h = if btc_4h.len() >= 2 {
-                                        let prev = &btc_4h[btc_4h.len() - 2];
-                                        let curr = btc_4h.last().unwrap();
-                                        (curr.close - prev.open) / prev.open * 100.0
-                                    } else {
-                                        btc_4h.last().map(|c| (c.close - c.open) / c.open * 100.0).unwrap_or(0.0)
-                                    };
-
-                                    // 3. Thực hiện quét và chấm điểm RS Z-Score
-                                    let shortlist = self.scanner_engine.scan(&context, btc_change_1d, btc_change_4h, &snapshots);
-
-                                    // [NGHIỆP VỤ QUAN TRỌNG] Lưu trữ dữ liệu các ứng viên tiềm năng vào Database
-                                    // Điều này phục vụ cho việc tra cứu lịch sử và làm đầu vào cho Phase 3.
-                                    let alt_tf = crate::core::config::AppConfig::load().altcoin_analysis_timeframe;
-                                    for candidate in &shortlist {
-                                        if let Some(snap) = snapshots.iter().find(|s| s.symbol == candidate.symbol) {
-                                            // Chuyển đổi Snapshot thành NormalizedCandleData để lưu vào DB
-                                            let db_data = NormalizedCandleData {
-                                                timestamp: now,
-                                                candle: crate::core::models::Candle {
-                                                    symbol: snap.symbol.clone(),
-                                                    timeframe: alt_tf.clone(),
-                                                    close: snap.price,
-                                                    is_closed: true,
-                                                    ..Default::default()
-                                                },
-                                                indicators: crate::core::models::Indicators {
-                                                    ema50: Some(snap.ema50_4h),
-                                                    ema200: Some(snap.ema200_4h),
-                                                    ..Default::default()
-                                                },
-                                                microstructure: crate::core::models::Microstructure {
-                                                    oi_change_4h_pct: snap.oi_growth_4h_pct,
-                                                    ..Default::default()
-                                                },
-                                                ..Default::default()
-                                            };
-                                            let _ = self.db.insert_closed_candle(&db_data).await;
-                                        }
-                                    }
-
-                                    let payload = ScannerPayload {
-                                        scan_timestamp: now,
-                                        shortlist,
-                                    };
-                                    let _ = self.app_handle.emit("market-event", &MarketEvent::ScannerUpdated(payload.clone()));
-                                    let _ = self.global_event_tx.send(MarketEvent::ScannerUpdated(payload));
-                                }
+                                self.trigger_altcoin_scan(context).await;
                             }
-                        } else {
-                            // [NGHIỆP VỤ QUAN TRỌNG] Khi Phase 1 chặn, gửi ngay danh sách rỗng để xóa UI
-                            let payload = ScannerPayload {
-                                scan_timestamp: chrono::Utc::now().timestamp(),
-                                shortlist: vec![],
-                            };
-                            let _ = self.app_handle.emit("market-event", &MarketEvent::ScannerUpdated(payload.clone()));
-                            let _ = self.global_event_tx.send(MarketEvent::ScannerUpdated(payload));
                         }
                     }
                 }
-                else => {
-                    info!("Pipeline channels closed. Exiting...");
-                    break;
-                }
+                else => break,
             }
         }
-
         Ok(())
     }
 
