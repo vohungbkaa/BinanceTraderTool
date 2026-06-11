@@ -50,7 +50,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // Đăng ký các hàm xử lý (Handlers) cho phép Frontend Invoke trực tiếp vào Backend.
-        .invoke_handler(tauri::generate_handler![greet, get_config])
+        .invoke_handler(tauri::generate_handler![
+            greet, 
+            get_config,
+            crate::core::admin::get_db_candles,
+            crate::core::admin::get_top_altcoins_metadata
+        ])
         .setup(|app| {
             info!("Tauri application setup...");
             let app_handle = app.handle().clone();
@@ -73,6 +78,9 @@ pub fn run() {
                         return;
                     }
                 };
+
+                // Đăng ký DB instance vào Managed State của Tauri để các Handler có thể sử dụng (qua tauri::State)
+                app_handle.manage(db.clone());
 
                 // 3. [PHASE 1] Market Regime Engine (Phân tích bối cảnh thị trường).
                 // Kích hoạt Engine dưới dạng tác vụ nền để lắng nghe sự kiện từ Event Bus.

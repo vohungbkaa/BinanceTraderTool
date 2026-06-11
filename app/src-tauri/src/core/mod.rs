@@ -1,4 +1,5 @@
 pub mod config;
+pub mod admin;
 pub mod breadth;
 pub mod db;
 pub mod events;

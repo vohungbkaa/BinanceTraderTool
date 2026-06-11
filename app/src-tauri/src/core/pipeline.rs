@@ -418,7 +418,7 @@ impl DataPipeline {
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
             step: "WARMUP_DONE".to_string(),
             progress: 100.0,
-            message: "System fully synchronized.",
+            message: "System fully synchronized.".to_string(),
         });
 
         Ok(())

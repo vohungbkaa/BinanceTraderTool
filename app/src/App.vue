@@ -10,9 +10,11 @@ import LogStream from './components/dashboard/LogStream.vue';
 import AltcoinScanner from './components/dashboard/AltcoinScanner.vue';
 import GlossaryModal from './components/common/GlossaryModal.vue';
 import InitialSyncOverlay from './components/common/InitialSyncOverlay.vue';
+import AdminView from './components/admin/AdminView.vue';
 
 const market = useMarketStore();
 const isGlossaryOpen = ref(false);
+const currentView = ref('dashboard');
 
 onMounted(() => {
   market.init();
@@ -21,9 +23,9 @@ onMounted(() => {
 
 <template>
   <div class="min-h-screen bg-[#0b0e11] text-[#eaecef] font-sans p-6">
-    <TheHeader />
+    <TheHeader :current-view="currentView" @navigate="currentView = $event" />
 
-    <div class="grid grid-cols-12 gap-6">
+    <div v-if="currentView === 'dashboard'" class="grid grid-cols-12 gap-6">
       <!-- Left Column: BTC Benchmark & Breadth -->
       <div class="col-span-12 lg:col-span-8 space-y-6">
         
@@ -64,6 +66,11 @@ onMounted(() => {
           :checklist="market.regime.checklist"
         />
       </div>
+    </div>
+
+    <!-- Admin / DB Explorer View -->
+    <div v-else-if="currentView === 'admin'">
+      <AdminView />
     </div>
 
     <InitialSyncOverlay :sync="market.syncProgress" />
