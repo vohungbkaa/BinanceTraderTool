@@ -30,7 +30,8 @@ impl BreadthEngine {
     }
 
     /// [SPEC 2.3] Tính toán Market Breadth với cơ chế Cache để bảo vệ IP
-    pub async fn update_breadth(&mut self, top_altcoins: &[String]) -> Result<()> {
+    /// Hàm này không yêu cầu Mutex Lock vì chỉ đọc dữ liệu và trả về kết quả tính toán.
+    pub async fn calculate_breadth(&self, top_altcoins: &[String]) -> Result<(f64, f64)> {
         info!("BreadthEngine: Calculating Market Breadth (High-Speed Mode)...");
         
         let mut count_above_ema50 = 0;
@@ -40,7 +41,7 @@ impl BreadthEngine {
         let config = crate::core::config::AppConfig::load();
         let tf = config.altcoin_analysis_timeframe;
 
-        if total == 0 { return Ok(()); }
+        if total == 0 { return Ok((0.0, 0.0)); }
 
         let completed_symbols = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let semaphore = Arc::new(tokio::sync::Semaphore::new(20)); // 20 luồng song song
@@ -131,9 +132,15 @@ impl BreadthEngine {
             }
         }
 
-        self.market_breadth_ema50 = (count_above_ema50 as f64 / total as f64) * 100.0;
-        self.market_breadth_ema200 = (count_above_ema200 as f64 / total as f64) * 100.0;
+        let ema50_val = (count_above_ema50 as f64 / total as f64) * 100.0;
+        let ema200_val = (count_above_ema200 as f64 / total as f64) * 100.0;
 
-        Ok(())
+        Ok((ema50_val, ema200_val))
+    }
+
+    /// Cập nhật kết quả tính toán vào trạng thái nội tại (Yêu cầu Mutex Lock)
+    pub fn apply_results(&mut self, ema50: f64, ema200: f64) {
+        self.market_breadth_ema50 = ema50;
+        self.market_breadth_ema200 = ema200;
     }
 }

@@ -118,10 +118,17 @@ impl DataPipeline {
                     let _ = app_handle_clone.emit("market-event", &MarketEvent::UniverseUpdated(candidates.clone()));
                     let _ = db_clone_sync.save_universe_candidates(&candidates).await;
                     let top_100: Vec<String> = candidates.into_iter().map(|c| c.symbol).collect();
-                    let breadth_ema50 = {
+                    let breadth_res = {
+                        let engine = breadth_engine_clone.lock().await;
+                        engine.calculate_breadth(&top_100).await
+                    };
+                    
+                    let breadth_ema50 = if let Ok((ema50, ema200)) = breadth_res {
                         let mut engine = breadth_engine_clone.lock().await;
-                        let _ = engine.update_breadth(&top_100).await;
-                        engine.market_breadth_ema50
+                        engine.apply_results(ema50, ema200);
+                        ema50
+                    } else {
+                        0.0
                     };
 
                     // [SPEC 2.3] Cập nhật xu hướng TOTAL3 (Dòng tiền Altcoin) dựa trên sức mạnh nội tại của thị trường (Breadth).
@@ -267,15 +274,16 @@ impl DataPipeline {
         Ok(())
     }
 
-    /// Lọc danh sách Top 100 Altcoin có thanh khoản cao nhất và xác lập baseline Độ rộng thị trường (Bullish/Bearish Regime).
+    /// Lọc danh sách Top 100 Altcoin có thanh khoản cao nhất v    /// Lọc danh sách Top 100 Altcoin có thanh khoản cao nhất và xác lập baseline Độ rộng thị trường (Bullish/Bearish Regime).
     async fn sync_metadata_and_breadth(&mut self) -> Result<()> {
         info!("[PIPELINE] Starting sync_metadata_and_breadth...");
 
-        // Xác định Scanning Universe dựa trên biến số Volume (Dòng tiền) và Vốn hóa.
+        // Bước 1: Xác định Scanning Universe (25%)
         let candidates = self.metadata_manager.get_top_altcoins(Some(&self.app_handle)).await?;
         let _ = self.app_handle.emit("market-event", &MarketEvent::UniverseUpdated(candidates.clone()));
         let _ = self.db.save_universe_candidates(&candidates).await;
         let top_alts: Vec<String> = candidates.into_iter().map(|c| c.symbol).collect();
+        let universe_set: std::collections::HashSet<String> = top_alts.iter().cloned().collect();
         info!("[PIPELINE] METADATA sync complete. Selected {} coins.", top_alts.len());
 
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
@@ -283,48 +291,63 @@ impl DataPipeline {
             message: "Initializing live stream connections...".to_string(),
         });
 
-        // Thiết lập danh sách Symbols cần giám sát trực tiếp (BTC + Universe).
+        // Bước 2: Khởi động WebSocket Worker (30%)
         let mut all_symbols = vec!["BTCUSDT".to_string()];
         all_symbols.extend(top_alts.clone());
         self.symbols = all_symbols.clone();
-
-        // Cập nhật danh mục theo dõi cho WebSocket Worker.
-        {
-            info!("[PIPELINE] Updating WebSocket symbols...");
-            self.ws_client.update_symbols(all_symbols).await;
-            info!("[PIPELINE] WebSocket symbols updated.");
-        }
+        self.ws_client.update_symbols(all_symbols).await;
 
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
-            step: "FUNDING".to_string(), progress: 45.0,
-            message: "Fetching initial funding rates...".to_string(),
+            step: "CONTEXT".to_string(), progress: 40.0,
+            message: "Fetching Funding & Breadth in parallel...".to_string(),
         });
 
-        // Lấy Snapshot ban đầu về Funding Rates (Chi phí duy trì vị thế) để đánh giá Sentiment.
-        if let Ok(premiums) = self.rest_client.fetch_premium_index().await {
-            info!("[PIPELINE] Fetching initial funding rates...");
-            let mut risk = self.risk_manager.lock().await;
-            for p in premiums {
-                let sym = p["symbol"].as_str().unwrap_or("").to_string();
-                let fr = p["lastFundingRate"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-                risk.symbol_funding.insert(sym, fr);
+        // Bước 3 & 4: Song song hóa Funding và Market Breadth (Tiết kiệm thời gian startup)
+        let rest = self.rest_client.clone();
+        let risk_manager = Arc::clone(&self.risk_manager);
+        let breadth_engine = Arc::clone(&self.breadth_engine);
+        let top_alts_clone = top_alts.clone();
+
+        let funding_task = async move {
+            match rest.fetch_premium_index().await {
+                Ok(premiums) => {
+                    let mut risk = risk_manager.lock().await;
+                    let mut count = 0;
+                    for p in premiums {
+                        let sym = p["symbol"].as_str().unwrap_or("").to_string();
+                        // Tối ưu RAM: Chỉ lưu funding của những coin trong Universe
+                        if universe_set.contains(&sym) || sym == "BTCUSDT" {
+                            let fr = p["lastFundingRate"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+                            risk.symbol_funding.insert(sym, fr);
+                            count += 1;
+                        }
+                    }
+                    info!("[PIPELINE] Funding rates synchronized for {} symbols.", count);
+                }
+                Err(e) => warn!("[PIPELINE] Funding sync failed: {}. Continuing...", e),
             }
-            info!("[PIPELINE] Funding rates synchronized.");
-        }
+        };
 
-        let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
-            step: "BREADTH".to_string(), progress: 55.0,
-            message: "Calculating Market Breadth...".to_string(),
-        });
+        let breadth_task = async move {
+            let calculation = {
+                let engine = breadth_engine.lock().await;
+                engine.calculate_breadth(&top_alts_clone).await
+            };
+            
+            if let Ok((ema50, ema200)) = calculation {
+                let mut engine = breadth_engine.lock().await;
+                engine.apply_results(ema50, ema200);
+                ema50
+            } else {
+                0.0
+            }
+        };
 
-        // Tính toán tỷ lệ phân bổ giá so với EMA50 trong Universe để xác lập Bullish/Bearish Regime tổng thể.
+        // Thực thi song song
+        let (_, ema50_val) = tokio::join!(funding_task, breadth_task);
+
+        // Cập nhật TOTAL3 Trend dựa trên kết quả Breadth vừa có
         {
-            info!("[PIPELINE] Updating Market Breadth...");
-            let mut breadth = self.breadth_engine.lock().await;
-            let _ = breadth.update_breadth(&top_alts).await;
-            let ema50_val = breadth.market_breadth_ema50;
-
-            // Ước tính vector xu hướng TOTAL3 (Thị trường Altcoin chung).
             let mut risk = self.risk_manager.lock().await;
             use crate::core::models::TrendDirection;
             risk.total3_trend = if ema50_val > 55.0 {
@@ -334,15 +357,13 @@ impl DataPipeline {
             } else {
                 TrendDirection::Sideway
             };
-            info!("[PIPELINE] Market Breadth calculated: {:.2}%", ema50_val);
         }
 
         let _ = self.app_handle.emit("market-event", &MarketEvent::SyncProgress {
-            step: "BREADTH_DONE".to_string(), progress: 70.0,
-            message: "Market Breadth sync complete.".to_string(),
+            step: "PHASE0_DONE".to_string(), progress: 70.0,
+            message: "Initial Context synchronization complete.".to_string(),
         });
 
-        info!("[PIPELINE] sync_metadata_and_breadth finished.");
         Ok(())
     }
 
