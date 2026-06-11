@@ -1,0 +1,21 @@
+--- app/src-tauri/src/core/db.rs
++++ app/src-tauri/src/core/db.rs
+@@ -204,6 +204,18 @@
+         Ok(data)
+     }
+ 
++    /// Đếm tổng số nến thô kèm chỉ báo kỹ thuật theo symbol
++    pub async fn count_search_candles(&self, search_term: &str, timeframe: &str) -> Result<i64> {
++        let pattern = format!("%{}%", search_term.to_uppercase());
++        let (count,): (i64,) = sqlx::query_as(
++            "SELECT COUNT(*) FROM closed_candles WHERE symbol LIKE ?1 AND timeframe = ?2"
++        )
++        .bind(pattern)
++        .bind(timeframe)
++        .fetch_one(&self.pool)
++        .await?;
++        Ok(count)
++    }
++
+     /// Lấy danh sách nến thô
+     pub async fn get_candles(&self, symbol: &str, timeframe: &str, limit: usize) -> Result<Vec<crate::core::models::Candle>> {
