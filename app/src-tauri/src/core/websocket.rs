@@ -101,6 +101,13 @@ impl BinanceWsClient {
                         req_id += 1;
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
+                    let _ = self
+                        .event_tx
+                        .send(MarketEvent::LiveFeedReady {
+                            stream_count: subscribed_streams.len(),
+                            timestamp: chrono::Utc::now().timestamp(),
+                        })
+                        .await;
 
                     // 1. Giới hạn 24 giờ của Binance
                     let connection_time = chrono::Utc::now();
@@ -168,6 +175,13 @@ impl BinanceWsClient {
                                         req_id += 1;
                                         tokio::time::sleep(Duration::from_millis(500)).await;
                                     }
+                                    let _ = self
+                                        .event_tx
+                                        .send(MarketEvent::LiveFeedReady {
+                                            stream_count: subscribed_streams.len(),
+                                            timestamp: chrono::Utc::now().timestamp(),
+                                        })
+                                        .await;
                                 }
                             }
                         }

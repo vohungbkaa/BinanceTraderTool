@@ -189,6 +189,15 @@ impl Database {
         Ok(candidates)
     }
 
+    /// Lấy thời điểm universe cache được refresh gần nhất.
+    pub async fn get_universe_updated_at(&self) -> Result<Option<i64>> {
+        let row = sqlx::query("SELECT MAX(updated_at) FROM universe_candidates")
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(row.and_then(|r| r.get::<Option<i64>, _>(0)))
+    }
+
     /// Lưu nến đã đóng
     pub async fn insert_closed_candle(&self, data: &NormalizedCandleData) -> Result<()> {
         let open_time_str = chrono::DateTime::from_timestamp_millis(data.candle.open_time)
@@ -490,11 +499,26 @@ impl Database {
         Ok(row.and_then(|r| r.get::<Option<i64>, _>(0)).unwrap_or(0))
     }
 
+    #[allow(dead_code)]
     pub async fn get_p40_range_90d(&self, symbol: &str) -> Result<f64> {
         let config = crate::core::config::AppConfig::load();
         let tf = config.altcoin_analysis_timeframe;
-        let rows = sqlx::query("SELECT range_24h_pct FROM closed_candles WHERE symbol = ?1 AND timeframe = ?2 ORDER BY open_time DESC LIMIT 90")
-            .bind(symbol).bind(&tf).fetch_all(&self.pool).await?;
+        self.get_p40_range_90d_for_tf(symbol, &tf).await
+    }
+
+    /// Tính P40 range của 90 nến gần nhất cho một timeframe cụ thể.
+    /// Lọc range_24h_pct > 0 để bỏ qua các nến warmup/backfill không có range thật.
+    pub async fn get_p40_range_90d_for_tf(&self, symbol: &str, timeframe: &str) -> Result<f64> {
+        let rows = sqlx::query(
+            "SELECT range_24h_pct FROM closed_candles
+             WHERE symbol = ?1 AND timeframe = ?2 AND range_24h_pct > 0
+             ORDER BY open_time DESC LIMIT 90",
+        )
+        .bind(symbol)
+        .bind(timeframe)
+        .fetch_all(&self.pool)
+        .await?;
+
         if rows.is_empty() {
             return Ok(0.0);
         }
@@ -502,5 +526,23 @@ impl Database {
         ranges.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let idx = (ranges.len() as f64 * 0.4) as usize;
         Ok(*ranges.get(idx).unwrap_or(&0.0))
+    }
+
+    /// Trung bình ATR14 của 20 nến gần nhất (loại trừ 0/NULL từ warmup).
+    /// Dùng để tính atr_surge_ratio = current_atr / avg_atr_20.
+    pub async fn get_avg_atr_20(&self, symbol: &str, timeframe: &str) -> Result<f64> {
+        let row = sqlx::query(
+            "SELECT AVG(atr14) FROM (
+                SELECT atr14 FROM closed_candles
+                WHERE symbol = ?1 AND timeframe = ?2 AND atr14 IS NOT NULL AND atr14 > 0
+                ORDER BY open_time DESC LIMIT 20
+            )",
+        )
+        .bind(symbol)
+        .bind(timeframe)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(row.get::<Option<f64>, _>(0).unwrap_or(0.0))
     }
 }

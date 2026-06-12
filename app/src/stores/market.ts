@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import type { NormalizedCandleData, MarketIndices, MarketRegimeContext, SyncProgress } from '../types/market';
@@ -34,8 +34,11 @@ export const useMarketStore = defineStore('market', () => {
     const hasRegimeData = ref(false);
     const hasBreadthData = ref(false);
     const btcLiveTimeframes = ref<Record<string, boolean>>({});
+    const hasLiveFeed = ref(false);
+    let syncFallbackTimer: ReturnType<typeof setTimeout> | null = null;
     let isInitialized = false;
 
+    const isSystemSyncing = computed(() => syncProgress.value !== null);
     const hasAnyBtcData = computed(() => Object.keys(btcData.value).length > 0);
     const hasRiskData = computed(() => Boolean(
         btcData.value['15m']?.microstructure || btcData.value['4h']?.microstructure || btcData.value['1d']?.microstructure
@@ -48,12 +51,23 @@ export const useMarketStore = defineStore('market', () => {
     const missingRegimeTimeframes = computed(() =>
         requiredRegimeTimeframes.value.filter((tf) => !btcLiveTimeframes.value[tf])
     );
-    const isRegimeLoading = computed(() =>
-        !hasRegimeData.value || missingRegimeTimeframes.value.length > 0
-    );
+    // isRegimeLoading: chỉ cần hasRegimeData (RegimeUpdated đã nhận ít nhất 1 lần).
+    // Không block trên missingRegimeTimeframes — việc chờ CandleUpdated cho 1D/4H/15m
+    // là không cần thiết và khiến UI bị "WAITING" mãi khi WebSocket chưa kịp gửi.
+    const isRegimeLoading = computed(() => isSystemSyncing.value || !hasRegimeData.value);
     const isScannerLoading = computed(() => {
-        if (isRegimeLoading.value) return true;
+        if (isSystemSyncing.value || isRegimeLoading.value) return true;
         return regime.value.allow_alt_scan && lastScanTime.value === 0;
+    });
+
+    watch([syncProgress, hasLiveFeed], ([progress, liveFeed]: [SyncProgress | null, boolean]) => {
+        if (progress?.step === 'WARMUP_DONE' || (progress && liveFeed)) {
+            setTimeout(() => {
+                if (syncProgress.value?.step === 'WARMUP_DONE' || hasLiveFeed.value) {
+                    syncProgress.value = null;
+                }
+            }, 1500);
+        }
     });
 
     async function init() {
@@ -74,12 +88,17 @@ export const useMarketStore = defineStore('market', () => {
 
             if (eventType === 'SyncProgress') {
                 syncProgress.value = event.payload.payload as SyncProgress;
-                if (syncProgress.value.step === 'WARMUP_DONE') {
-                    // Tự động đóng loading sau 1s khi hoàn tất
-                    setTimeout(() => {
+                if (syncFallbackTimer) clearTimeout(syncFallbackTimer);
+                if (syncProgress.value.step !== 'WARMUP_DONE') {
+                    syncFallbackTimer = setTimeout(() => {
                         syncProgress.value = null;
-                    }, 1500);
+                    }, 180000);
                 }
+                return;
+            }
+
+            if (eventType === 'LiveFeedReady') {
+                hasLiveFeed.value = true;
                 return;
             }
 
@@ -130,6 +149,8 @@ export const useMarketStore = defineStore('market', () => {
         syncProgress,
         hasRegimeData,
         hasBreadthData,
+        hasLiveFeed,
+        isSystemSyncing,
         hasAnyBtcData,
         hasRiskData,
         missingRegimeTimeframes,

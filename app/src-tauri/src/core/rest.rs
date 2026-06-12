@@ -76,8 +76,6 @@ impl BinanceRestClient {
             self.base_url, symbol, interval, limit
         );
 
-        info!("Fetching historical klines: {}", url);
-
         let res: Value = self.get_json("klines", url, kline_weight(limit)).await?;
 
         let mut candles = Vec::new();

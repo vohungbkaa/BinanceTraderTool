@@ -145,8 +145,16 @@ pub struct MarketRegimeContext {
 }
 
 pub struct MarketRegimeEngine {
+    /// Nến 1D cuối đã đóng — dùng cho Structural Trend (ema200, structure).
+    /// CHỈ cập nhật từ CandleClosed 1D để đảm bảo indicators hoàn chỉnh.
     latest_1d: Option<NormalizedCandleData>,
+    /// Nến 4H cuối đã đóng — dùng cho Operational State (adx, di+, di-).
+    /// CHỈ cập nhật từ CandleClosed 4H.
     latest_4h: Option<NormalizedCandleData>,
+    /// Snapshot risk mới nhất từ bất kỳ nến BTC nào đã đóng (15m, 4h, 1d).
+    /// Chứa microstructure, market_indices, macro_events luôn fresh.
+    /// KHÔNG dùng để phân tích indicators — chỉ dùng cho Risk Layer.
+    latest_risk_snapshot: Option<NormalizedCandleData>,
 }
 
 impl MarketRegimeEngine {
@@ -154,6 +162,7 @@ impl MarketRegimeEngine {
         Self {
             latest_1d: None,
             latest_4h: None,
+            latest_risk_snapshot: None,
         }
     }
 
@@ -168,24 +177,33 @@ impl MarketRegimeEngine {
         loop {
             match event_rx.recv().await {
                 Ok(event) => match event {
-                    MarketEvent::CandleClosed(data) | MarketEvent::CandleUpdated(data) => {
+                    // CHỈ nhận CandleClosed, KHÔNG nhận CandleUpdated.
+                    // CandleUpdated dùng process_unclosed() → indicator state chưa warm-up
+                    // (EMA200 = close) → sẽ corrupt latest_1d/latest_4h nếu nhận vào.
+                    MarketEvent::CandleClosed(data) => {
                         if data.candle.symbol == "BTCUSDT" {
-                            let mut trigger_analysis = false;
+                            let tf = data.candle.timeframe.as_str();
 
-                            let alt_tf =
-                                crate::core::config::AppConfig::load().altcoin_analysis_timeframe;
-                            if data.candle.timeframe == alt_tf {
+                            // Mọi TF đều refresh risk snapshot để microstructure/breadth/OI luôn fresh.
+                            // 15m đóng nến mỗi 15 phút → risk layer được cập nhật liên tục.
+                            self.latest_risk_snapshot = Some(data.clone());
+
+                            // 1D/4H cập nhật indicator context và trigger re-analysis.
+                            // 15m chỉ refresh risk, không overwrite indicator context.
+                            let trigger_analysis = if tf == "1d" {
                                 self.latest_1d = Some(data.clone());
-                                trigger_analysis = true;
-                            } else if data.candle.timeframe == "4h" {
+                                self.has_required_context()
+                            } else if tf == "4h" {
                                 self.latest_4h = Some(data.clone());
-                                trigger_analysis = true;
-                            } else if data.candle.timeframe == "15m" {
-                                trigger_analysis = true;
-                            }
+                                self.has_required_context()
+                            } else {
+                                // 15m (và các TF khác): chỉ trigger nếu đã có đủ context.
+                                // Re-analysis với risk snapshot mới nhưng indicators từ 1D/4H đã đóng.
+                                self.has_required_context()
+                            };
 
                             if trigger_analysis {
-                                let context = self.analyze(&data).await;
+                                let context = self.analyze().await;
                                 if let Err(e) = event_tx.send(MarketEvent::RegimeUpdated(context)) {
                                     error!("Failed to broadcast RegimeUpdated: {}", e);
                                 }
@@ -205,7 +223,12 @@ impl MarketRegimeEngine {
         }
     }
 
-    /// Dành riêng cho Backtest/Simulator: Nhồi trực tiếp dữ liệu 1D và 4H để lấy kết quả
+    fn has_required_context(&self) -> bool {
+        self.latest_1d.is_some() && self.latest_4h.is_some()
+    }
+
+    /// Dành riêng cho Backtest/Simulator: Nhồi trực tiếp dữ liệu 1D và 4H để lấy kết quả.
+    /// Risk snapshot dùng data_4h (giả lập trạng thái operational tại thời điểm đó).
     pub async fn evaluate_historical(
         &mut self,
         data_1d: &NormalizedCandleData,
@@ -213,11 +236,13 @@ impl MarketRegimeEngine {
     ) -> MarketRegimeContext {
         self.latest_1d = Some(data_1d.clone());
         self.latest_4h = Some(data_4h.clone());
-        // Giả lập nến trigger là nến 4H
-        self.analyze(data_4h).await
+        self.latest_risk_snapshot = Some(data_4h.clone());
+        self.analyze().await
     }
 
-    async fn analyze(&self, current_data: &NormalizedCandleData) -> MarketRegimeContext {
+    /// Phân tích chỉ được gọi khi has_required_context() == true,
+    /// đảm bảo latest_1d và latest_4h đều là Some.
+    async fn analyze(&self) -> MarketRegimeContext {
         let mut risk_status = RiskStatus::Normal;
         let mut allow_alt_scan = false;
         let mut action_mode = ActionMode::OffSystem;
@@ -226,9 +251,24 @@ impl MarketRegimeEngine {
         let mut oi_state = OIState::Neutral;
         let mut checklist = Vec::new();
 
-        let data_1d = self.latest_1d.as_ref().unwrap_or(current_data);
-        let data_4h = self.latest_4h.as_ref().unwrap_or(current_data);
-        let risk_data = current_data;
+        // SAFETY: unwrap() an toàn vì analyze() chỉ được gọi sau khi
+        // has_required_context() trả về true (đảm bảo cả hai đều là Some).
+        let data_1d = self.latest_1d.as_ref().unwrap();
+        let data_4h = self.latest_4h.as_ref().unwrap();
+
+        info!(
+            "[REGIME] analyze() triggered | 1D: close={:.1} ema200={:?} struct={} range={:.4} p40={:.4} atr_surge={:.2} | 4H: close={:.1} ema50={:?} adx={:?} +DI={:?} -DI={:?} struct={} range={:.4}",
+            data_1d.candle.close, data_1d.indicators.ema200, data_1d.indicators.structure,
+            data_1d.range_24h_pct, data_1d.range_p40_90d, data_1d.atr_surge_ratio,
+            data_4h.candle.close, data_4h.indicators.ema50, data_4h.indicators.adx14,
+            data_4h.indicators.plus_di, data_4h.indicators.minus_di, data_4h.indicators.structure,
+            data_4h.range_24h_pct,
+        );
+        // risk_data: ưu tiên latest_risk_snapshot (cập nhật mỗi 15m close) nếu có,
+        // fallback về data_4h. Tách biệt risk layer khỏi indicator layer:
+        // - Structural/Operational analysis → closed 1D/4H (indicators ổn định)
+        // - Risk layer (OI, liquidation, breadth, event block) → 15m snapshot (luôn fresh)
+        let risk_data = self.latest_risk_snapshot.as_ref().unwrap_or(data_4h);
 
         // ---------------------------------------------------------
         // BỘ LỌC 1: QUẢN TRỊ RỦI RO (RISK FIRST)
@@ -274,15 +314,19 @@ impl MarketRegimeEngine {
 
             let is_hh_hl =
                 data_1d.indicators.structure == "HH" || data_1d.indicators.structure == "HL";
+            let is_ll_lh_1d =
+                data_1d.indicators.structure == "LL" || data_1d.indicators.structure == "LH";
 
-            if data_1d.candle.close > ema200
-                && data_1d.indicators.close_above_ema200_count >= 3
-                && is_hh_hl
-            {
+            if data_1d.candle.close > ema200 && is_hh_hl {
+                // Macro Bullish: giá trên EMA200 + cấu trúc uptrend (HH hoặc HL).
+                // Đối xứng với Bearish: không cần đếm nến liên tiếp (field không lưu DB, reset mỗi startup).
                 structural_trend = StructuralTrend::MacroBullish;
-            } else if data_1d.candle.close < ema200 {
+            } else if data_1d.candle.close < ema200 || is_ll_lh_1d {
+                // Macro Bearish: giá dưới EMA200 (điều kiện chính)
+                // HOẶC cấu trúc LL/LH dù giá chưa break dưới EMA200 (early warning).
                 structural_trend = StructuralTrend::MacroBearish;
             }
+            // MacroNeutral (default): giá trên EMA200 nhưng cấu trúc chưa xác nhận (LH/LH — đang phân phối).
         }
 
         // Tầng Vi Mô (4H)
@@ -323,10 +367,13 @@ impl MarketRegimeEngine {
             }
         }
 
-        // Volatility Regime
-        let (volatility_regime, is_expansion) = if risk_data.atr_surge_ratio > 2.5 {
+        // Volatility Regime — đánh giá ở tầng macro (1D):
+        // - ATR surge và range expansion trên daily chart phản ánh đúng trạng thái thị trường tổng thể.
+        // - risk_data (4H) giữ vai trò quản trị rủi ro tức thời (OI, liquidation, event block),
+        //   không phải thước đo volatility macro.
+        let (volatility_regime, is_expansion) = if data_1d.atr_surge_ratio > 2.5 {
             (VolatilityRegime::Extreme, true)
-        } else if risk_data.range_24h_pct > risk_data.range_p40_90d * 1.2 {
+        } else if data_1d.range_24h_pct > data_1d.range_p40_90d * 1.2 {
             (VolatilityRegime::Expansion, true)
         } else {
             (VolatilityRegime::Compression, false)
@@ -445,6 +492,12 @@ impl MarketRegimeEngine {
             flow_score = 0;
         }
 
+        info!(
+            "[REGIME] result | structural={} operational={} volatility={:?} risk={} | trend={} flow={} action={} allow_scan={}",
+            structural_trend, operational_state, volatility_regime, risk_status,
+            trend_score, flow_score, action_mode, allow_alt_scan
+        );
+
         // ---------------------------------------------------------
         // ACTION MODE (GATEWAY)
         // ---------------------------------------------------------
@@ -549,9 +602,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_ideal_bullish_scenario() {
-        let engine = MarketRegimeEngine::new();
+        let mut engine = MarketRegimeEngine::new();
         let data = default_mock_data();
-        let context = engine.analyze(&data).await;
+        let context = engine.evaluate_historical(&data, &data).await;
 
         assert_eq!(context.risk_status, RiskStatus::Normal);
         assert_eq!(context.structural_trend, StructuralTrend::MacroBullish);
@@ -563,11 +616,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_risk_block() {
-        let engine = MarketRegimeEngine::new();
+        let mut engine = MarketRegimeEngine::new();
         let mut data = default_mock_data();
         data.macro_events.is_event_block_window = true; // Sắp có FOMC
 
-        let context = engine.analyze(&data).await;
+        let context = engine.evaluate_historical(&data, &data).await;
 
         assert_eq!(context.risk_status, RiskStatus::EventBlock);
         assert_eq!(context.trend_score + context.flow_score, 0); // Bị ép về 0
@@ -577,31 +630,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_dynamic_sideway_rejection() {
-        let engine = MarketRegimeEngine::new();
+        let mut engine = MarketRegimeEngine::new();
         let mut data = default_mock_data();
         data.indicators.adx14 = Some(15.0); // Dưới 20
         data.range_24h_pct = 2.0; // Nhỏ hơn P40 (3.0)
         data.indicators.ema50_slope = 0.02; // Gần 0
 
-        let context = engine.analyze(&data).await;
+        let context = engine.evaluate_historical(&data, &data).await;
 
         assert_eq!(context.operational_state, OperationalState::DynamicSideway);
         // Để test ra MeanReversion, điểm phải >= 40.
-        // Trend = 0 (do sideway), Risk = 15, Pos = 18, Flow cần thêm điểm.
-        // Set TOTAL3 = UP để lấy 20 điểm Flow -> Tổng = 53 điểm.
+        // Set btc_d_trend = Up để lấy thêm điểm Flow -> Tổng đủ >= 40.
         data.market_indices.btc_d_trend = crate::core::models::TrendDirection::Up;
         data.market_indices.total3_btc_trend = crate::core::models::TrendDirection::Up;
 
-        let context2 = engine.analyze(&data).await;
+        let context2 = engine.evaluate_historical(&data, &data).await;
         assert_eq!(context2.allow_alt_scan, false);
         assert_eq!(context2.action_mode, ActionMode::MeanReversion);
     }
 
     #[tokio::test]
     async fn test_bearish_flow_alignment() {
-        let engine = MarketRegimeEngine::new();
+        let mut engine = MarketRegimeEngine::new();
         let mut data = default_mock_data();
-        // Setup Bearish
+        // Setup Bearish: close < ema50 < ema200, structure LL, -DI > +DI
         data.candle.close = 40000.0;
         data.indicators.ema50 = Some(45000.0);
         data.indicators.ema200 = Some(50000.0);
@@ -609,14 +661,18 @@ mod tests {
         data.indicators.plus_di = Some(15.0);
         data.indicators.minus_di = Some(25.0);
 
-        // Flow thuận Bearish (Dòng tiền rút)
-        data.market_indices.btc_d_trend = crate::core::models::TrendDirection::Up;
+        // Flow thuận Bearish: breadth thấp (<40%), BTC dominance tăng, CVD âm
+        data.market_indices.market_breadth_pct_above_ema50 = 30.0; // <40 → bearish breadth
+        data.market_indices.btc_d_trend = crate::core::models::TrendDirection::Up; // BTC.D tăng khi bear
         data.market_indices.total3_btc_trend = crate::core::models::TrendDirection::Down;
+        // flow_score = 25 (breadth) + 25 (btc_d) = 50 → flow_alignment = true
 
-        let context = engine.analyze(&data).await;
+        // 1D bearish + 4H bearish được feed đúng timeframe
+        let context = engine.evaluate_historical(&data, &data).await;
 
         assert_eq!(context.structural_trend, StructuralTrend::MacroBearish);
         assert_eq!(context.operational_state, OperationalState::ActiveBearish);
+        assert!(context.flow_score >= 50, "flow_score={} phải >= 50 để cho phép short", context.flow_score);
         assert_eq!(context.allow_alt_scan, true); // Cho phép short
     }
 }

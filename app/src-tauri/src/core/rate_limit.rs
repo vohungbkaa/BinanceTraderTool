@@ -10,6 +10,7 @@ struct RateLimitState {
     used_weight: u32,
     consecutive_429: u32,
     circuit_open_until: Option<Instant>,
+    last_pause_log_until: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +33,7 @@ impl BinanceRateLimiter {
                 used_weight: 0,
                 consecutive_429: 0,
                 circuit_open_until: None,
+                last_pause_log_until: None,
             })),
             semaphore: Arc::new(Semaphore::new(max_concurrency.max(1))),
             max_weight_per_minute,
@@ -57,7 +59,33 @@ impl BinanceRateLimiter {
                     state.used_weight = 0;
                     None
                 } else if state.used_weight.saturating_add(weight) > self.safety_weight_per_minute {
-                    Some(Duration::from_secs(60) - now.duration_since(state.window_started_at))
+                    let duration =
+                        Duration::from_secs(60) - now.duration_since(state.window_started_at);
+                    let should_warn = state
+                        .last_pause_log_until
+                        .map(|until| until <= now)
+                        .unwrap_or(true);
+                    if should_warn {
+                        warn!(
+                            endpoint,
+                            weight,
+                            used_weight = state.used_weight,
+                            safety_weight = self.safety_weight_per_minute,
+                            sleep_ms = duration.as_millis(),
+                            "Binance REST limiter pausing request queue"
+                        );
+                        state.last_pause_log_until = Some(now + duration);
+                    } else {
+                        debug!(
+                            endpoint,
+                            weight,
+                            used_weight = state.used_weight,
+                            safety_weight = self.safety_weight_per_minute,
+                            sleep_ms = duration.as_millis(),
+                            "Binance REST request waiting for next weight window"
+                        );
+                    }
+                    Some(duration)
                 } else {
                     state.used_weight = state.used_weight.saturating_add(weight);
                     debug!(
@@ -72,12 +100,6 @@ impl BinanceRateLimiter {
             };
 
             if let Some(duration) = sleep_for {
-                warn!(
-                    endpoint,
-                    weight,
-                    sleep_ms = duration.as_millis(),
-                    "Binance REST limiter pausing before request"
-                );
                 tokio::time::sleep(duration).await;
                 continue;
             }

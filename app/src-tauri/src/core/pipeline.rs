@@ -19,6 +19,8 @@ use super::websocket::BinanceWsClient;
 use crate::core::models::NormalizedCandleData;
 use crate::engine::scanner::{ScannerEngine, ScannerPayload};
 
+const STARTUP_UNIVERSE_CACHE_TTL_MS: i64 = 60 * 60 * 1000;
+
 pub struct DataPipeline {
     market_event_rx: mpsc::Receiver<MarketEvent>,
     system_event_rx: mpsc::Receiver<SystemEvent>,
@@ -155,15 +157,6 @@ impl DataPipeline {
         // 5. Prime nhanh BTC từ cache để Phase 1/UI có context trước khi background warmup hoàn tất.
         self.prime_cached_btc_context().await;
 
-        let _ = self.app_handle.emit(
-            "market-event",
-            &MarketEvent::SyncProgress {
-                step: "WARMUP_DONE".to_string(),
-                progress: 100.0,
-                message: "Live feed ready. Background sync is continuing.".to_string(),
-            },
-        );
-
         self.spawn_background_bootstrap();
 
         // 6. Vòng lặp điều phối chính: Phân phối sự kiện và kích hoạt Scanner.
@@ -216,9 +209,11 @@ impl DataPipeline {
                                             .and_then(|s| s.parse::<f64>().ok())
                                             .unwrap_or(0.0);
 
-                                        let btc_4h = self.db.get_candles("BTCUSDT", "4h", 2).await.unwrap_or_default();
-                                        let btc_change_4h = if btc_4h.len() >= 2 {
-                                            (btc_4h.last().unwrap().close - btc_4h[0].open) / btc_4h[0].open * 100.0
+                                        // Lấy 1 nến 4H gần nhất — tính % change trong nến đó (open→close).
+                                        // Trước đây lấy 2 nến và tính từ nến[0].open → nến[1].close = 8H span, sai tên.
+                                        let btc_4h = self.db.get_candles("BTCUSDT", "4h", 1).await.unwrap_or_default();
+                                        let btc_change_4h = if let Some(c) = btc_4h.first() {
+                                            if c.open > 0.0 { (c.close - c.open) / c.open * 100.0 } else { 0.0 }
                                         } else { 0.0 };
 
                                         let shortlist = self.scanner_engine.scan(&context, btc_change_1d, btc_change_4h, &snapshots);
@@ -305,6 +300,8 @@ impl DataPipeline {
     }
 
     async fn prime_cached_btc_context(&self) {
+        // Thứ tự: 1D → 4H (indicator context) → 15m (risk snapshot seed).
+        // 15m được broadcast cuối để set latest_risk_snapshot trước khi live 15m feed đến.
         let tfs = ["1d", "4h", "15m"];
         for tf in tfs {
             if let Ok(btc_data) = self.db.get_candles_with_indicators("BTCUSDT", tf, 1).await {
@@ -323,6 +320,29 @@ impl DataPipeline {
                     indices.market_breadth_pct_above_ema50 = e50;
                     indices.market_breadth_pct_above_ema200 = e200;
                     data.market_indices = indices;
+
+                    // Enrich range và ATR surge để Volatility Regime hoạt động đúng từ khởi động.
+                    // Không có range → luôn là Compression; không có atr_surge_ratio → không phát VolatilityAlert.
+                    if data.candle.open > 0.0 {
+                        data.range_24h_pct =
+                            (data.candle.high - data.candle.low) / data.candle.open;
+                    }
+                    data.range_p40_90d = self
+                        .db
+                        .get_p40_range_90d_for_tf("BTCUSDT", tf)
+                        .await
+                        .unwrap_or(0.0);
+                    if let Some(current_atr) = data.indicators.atr14 {
+                        let avg_atr = self
+                            .db
+                            .get_avg_atr_20("BTCUSDT", tf)
+                            .await
+                            .unwrap_or(current_atr);
+                        if avg_atr > 0.0 {
+                            data.atr_surge_ratio = current_atr / avg_atr;
+                        }
+                    }
+
                     let _ = self.global_event_tx.send(MarketEvent::CandleClosed(data));
                 }
             }
@@ -341,7 +361,77 @@ impl DataPipeline {
 
         tokio::spawn(async move {
             info!("[PIPELINE] Background bootstrap started.");
-            match metadata_manager.get_top_altcoins(None).await {
+            let _ = app_handle.emit(
+                "market-event",
+                &MarketEvent::SyncProgress {
+                    step: "BACKGROUND_SYNC".to_string(),
+                    progress: 72.0,
+                    message: "Checking local universe cache before Binance refresh...".to_string(),
+                },
+            );
+
+            let cached_candidates = db
+                .get_stored_universe_candidates()
+                .await
+                .unwrap_or_default();
+            let cache_age_ms =
+                db.get_universe_updated_at()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|updated_at| {
+                        chrono::Utc::now()
+                            .timestamp_millis()
+                            .saturating_sub(updated_at)
+                    });
+
+            if !cached_candidates.is_empty()
+                && cache_age_ms
+                    .map(|age| age <= STARTUP_UNIVERSE_CACHE_TTL_MS)
+                    .unwrap_or(false)
+            {
+                let age_minutes = cache_age_ms.unwrap_or_default() / 60_000;
+                info!(
+                    "[PIPELINE] Using fresh universe cache (age={}m); skipping startup REST metadata refresh.",
+                    age_minutes
+                );
+
+                let _ = app_handle.emit(
+                    "market-event",
+                    &MarketEvent::UniverseUpdated(cached_candidates.clone()),
+                );
+
+                let top_alts: Vec<String> =
+                    cached_candidates.iter().map(|c| c.symbol.clone()).collect();
+                {
+                    let mut risk = risk_manager.lock().await;
+                    for candidate in &cached_candidates {
+                        risk.symbol_funding
+                            .insert(candidate.symbol.clone(), candidate.funding_rate);
+                    }
+                }
+
+                let mut ws_symbols = vec!["BTCUSDT".to_string()];
+                ws_symbols.extend(top_alts);
+                ws_symbols.sort();
+                ws_symbols.dedup();
+                ws_client.update_symbols(ws_symbols).await;
+
+                let _ = app_handle.emit(
+                    "market-event",
+                    &MarketEvent::SyncProgress {
+                        step: "WARMUP_DONE".to_string(),
+                        progress: 100.0,
+                        message: format!(
+                            "Live feed ready from cached universe; skipped startup REST refresh (cache age {}m).",
+                            age_minutes
+                        ),
+                    },
+                );
+                return;
+            }
+
+            match metadata_manager.get_top_altcoins(Some(&app_handle)).await {
                 Ok(candidates) => {
                     let _ = app_handle.emit(
                         "market-event",
@@ -388,8 +478,7 @@ impl DataPipeline {
                         let breadth_e = Arc::clone(&breadth_engine);
                         let alts = top_alts.clone();
                         async move {
-                            if let Ok((e50, e200)) = breadth_e.calculate_breadth_silent(&alts).await
-                            {
+                            if let Ok((e50, e200)) = breadth_e.calculate_breadth(&alts).await {
                                 breadth_e.apply_results(e50, e200).await;
                                 e50
                             } else {
@@ -398,7 +487,36 @@ impl DataPipeline {
                         }
                     };
 
-                    let (_, ema50_val) = tokio::join!(funding_task, breadth_task);
+                    let _ = app_handle.emit(
+                        "market-event",
+                        &MarketEvent::SyncProgress {
+                            step: "CONTEXT".to_string(),
+                            progress: 82.0,
+                            message: "Synchronizing funding and market breadth...".to_string(),
+                        },
+                    );
+
+                    let context_result =
+                        tokio::time::timeout(tokio::time::Duration::from_secs(120), async {
+                            tokio::join!(funding_task, breadth_task)
+                        })
+                        .await;
+
+                    let ema50_val = match context_result {
+                        Ok((_, ema50_val)) => ema50_val,
+                        Err(_) => {
+                            warn!("[PIPELINE] Funding/breadth sync timed out; continuing with cached context.");
+                            let _ = app_handle.emit(
+                                "market-event",
+                                &MarketEvent::SyncProgress {
+                                    step: "CONTEXT".to_string(),
+                                    progress: 88.0,
+                                    message: "Context sync is delayed by rate limits; continuing with cached data.".to_string(),
+                                },
+                            );
+                            0.0
+                        }
+                    };
                     {
                         let mut risk = risk_manager.lock().await;
                         use crate::core::models::TrendDirection;
@@ -411,14 +529,41 @@ impl DataPipeline {
                         };
                     }
 
-                    if let Err(e) =
-                        Self::warmup_symbols(ws_symbols, db, rest_client, indicator_engine, None)
-                            .await
+                    if let Err(e) = Self::warmup_symbols(
+                        ws_symbols,
+                        db,
+                        rest_client,
+                        indicator_engine,
+                        Some(app_handle.clone()),
+                    )
+                    .await
                     {
                         warn!("[PIPELINE] Background warmup failed: {}", e);
                     }
+
+                    let _ = app_handle.emit(
+                        "market-event",
+                        &MarketEvent::SyncProgress {
+                            step: "WARMUP_DONE".to_string(),
+                            progress: 100.0,
+                            message: "Universe, funding, breadth, and warmup synchronized."
+                                .to_string(),
+                        },
+                    );
                 }
-                Err(e) => warn!("[PIPELINE] Background universe refresh failed: {}", e),
+                Err(e) => {
+                    warn!("[PIPELINE] Background universe refresh failed: {}", e);
+                    let _ = app_handle.emit(
+                        "market-event",
+                        &MarketEvent::SyncProgress {
+                            step: "WARMUP_DONE".to_string(),
+                            progress: 100.0,
+                            message:
+                                "Live feed ready with cached context; background refresh failed."
+                                    .to_string(),
+                        },
+                    );
+                }
             }
         });
     }
@@ -650,13 +795,39 @@ impl DataPipeline {
                 data.indicators = engine.process(&data.candle);
 
                 let alt_tf = crate::core::config::AppConfig::load().altcoin_analysis_timeframe;
-                if data.candle.timeframe == alt_tf {
-                    data.range_24h_pct = (data.candle.high - data.candle.low) / data.candle.open;
+                let tf = data.candle.timeframe.as_str();
+                let is_btc = data.candle.symbol == "BTCUSDT";
+
+                // range_24h_pct: phép tính đơn giản, luôn compute cho mọi nến đóng.
+                // Dùng bởi scanner (altcoin 1D) và regime engine (BTC 4H + 1D).
+                if data.candle.open > 0.0 {
+                    data.range_24h_pct =
+                        (data.candle.high - data.candle.low) / data.candle.open;
+                }
+
+                // range_p40_90d và atr_surge_ratio yêu cầu truy vấn DB — chỉ compute khi cần:
+                // - Scanner cần cho mọi symbol ở altcoin_analysis_timeframe
+                // - Regime engine cần cho BTCUSDT 4H (operational) và 1D (macro)
+                let is_regime_tf = is_btc && (tf == "4h" || tf == "1d");
+                if tf == alt_tf || is_regime_tf {
                     data.range_p40_90d = self
                         .db
-                        .get_p40_range_90d(&data.candle.symbol)
+                        .get_p40_range_90d_for_tf(&data.candle.symbol, tf)
                         .await
                         .unwrap_or(0.0);
+
+                    // atr_surge_ratio = current_atr14 / avg_atr14_20_nến
+                    // > 2.5 → Volatility Expansion; > 3.0 → VolatilityAlert
+                    if let Some(current_atr) = data.indicators.atr14 {
+                        let avg_atr = self
+                            .db
+                            .get_avg_atr_20(&data.candle.symbol, tf)
+                            .await
+                            .unwrap_or(current_atr);
+                        if avg_atr > 0.0 {
+                            data.atr_surge_ratio = current_atr / avg_atr;
+                        }
+                    }
                 }
 
                 {
@@ -748,6 +919,10 @@ impl DataPipeline {
                 } else {
                     risk.symbol_funding.insert(symbol, funding_rate);
                 }
+            }
+            MarketEvent::LiveFeedReady { .. } => {
+                let _ = self.app_handle.emit("market-event", &event);
+                let _ = self.global_event_tx.send(event);
             }
             _ => {
                 let _ = self.global_event_tx.send(event);

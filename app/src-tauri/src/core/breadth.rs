@@ -37,10 +37,6 @@ impl BreadthEngine {
         self.calculate_breadth_internal(top_altcoins, true).await
     }
 
-    pub async fn calculate_breadth_silent(&self, top_altcoins: &[String]) -> Result<(f64, f64)> {
-        self.calculate_breadth_internal(top_altcoins, false).await
-    }
-
     async fn calculate_breadth_internal(
         &self,
         top_altcoins: &[String],

@@ -44,13 +44,13 @@ onMounted(() => {
             :key="tf" 
             :tf="tf" 
             :data="market.btcData[tf]" 
-            :is-loading="!market.btcData[tf]"
+            :is-loading="market.isSystemSyncing || !market.btcData[tf]"
           />
         </div>
 
         <MarketBreadth 
           :indices="market.marketIndices" 
-          :is-loading="!market.hasBreadthData"
+          :is-loading="market.isSystemSyncing || !market.hasBreadthData"
         />
 
         <!-- Altcoin Scanner Results (Phase 2) -->
@@ -66,7 +66,7 @@ onMounted(() => {
         <RiskMonitor
           next-event="FOMC Meeting"
           :microstructure="market.btcData['15m']?.microstructure || market.btcData['4h']?.microstructure || null"
-          :is-loading="!market.hasRiskData"
+          :is-loading="market.isSystemSyncing || !market.hasRiskData"
         />
         
         <LogStream 

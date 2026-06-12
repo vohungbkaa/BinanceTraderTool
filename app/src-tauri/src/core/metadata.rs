@@ -32,7 +32,7 @@ pub struct UniverseCandidate {
 
 pub struct MetadataManager {
     rest_client: BinanceRestClient,
-    // (ATR_Value, Yesterday_Volume, Timestamp_ms)
+    // (ATR_Value_Pct, Vol_Change_24h_Pct, Timestamp_ms)
     atr_cache: Arc<RwLock<HashMap<String, (f64, f64, i64)>>>,
 }
 
@@ -84,9 +84,10 @@ impl MetadataManager {
         // Constants for Scoring Logic
         const INITIAL_UNIVERSE_LIMIT: usize = 300;
         const OI_FILTER_LIMIT: usize = 150;
-        const ATR_SWEET_MIN: f64 = 0.02;
-        const ATR_SWEET_MAX: f64 = 0.08;
-        const ATR_HIGH_THRESH: f64 = 0.15;
+        // Ngưỡng thanh khoản tối thiểu — loại coin illiquid trước khi scoring.
+        // Trader chuyên nghiệp không trade coin dưới $50M volume hay $20M OI vì slippage cao.
+        const MIN_QUOTE_VOLUME_USD: f64 = 50_000_000.0;
+        const MIN_OPEN_INTEREST_USD: f64 = 20_000_000.0;
         const ATR_CACHE_TTL_MS: i64 = 4 * 60 * 60 * 1000;
 
         emit_progress(
@@ -129,12 +130,13 @@ impl MetadataManager {
             .into_iter()
             .filter_map(|t| {
                 let symbol = t["symbol"].as_str()?.to_string();
+                // ETH được giữ lại: là leading indicator của dòng tiền vào alts,
+                // thường lead rotation BTC→ETH→altcoin trong bull cycle.
                 if !valid_symbols.contains(&symbol)
                     || !symbol.ends_with("USDT")
                     || symbol.starts_with("USDC")
                     || symbol.starts_with("BUSD")
                     || symbol == "BTCUSDT"
-                    || symbol == "ETHUSDT"
                 {
                     return None;
                 }
@@ -159,7 +161,9 @@ impl MetadataManager {
             })
             .collect();
 
-        // 3. Sort Volume
+        // 3. Sort Volume — áp ngưỡng thanh khoản tối thiểu trước khi lấy top.
+        // Loại coin < $50M 24h vol để tránh slippage và wash trading coins nhỏ.
+        raw_candidates.retain(|r| r.vol >= MIN_QUOTE_VOLUME_USD);
         raw_candidates.sort_by(|a, b| b.vol.partial_cmp(&a.vol).unwrap_or(Ordering::Equal));
         raw_candidates.truncate(INITIAL_UNIVERSE_LIMIT);
         let top_symbols: Vec<String> = raw_candidates.iter().map(|c| c.symbol.clone()).collect();
@@ -230,18 +234,20 @@ impl MetadataManager {
                 .await?
         };
 
-        // 6. ATR & Yesterday Vol Cache
+        // 6. ATR & Vol Change Cache (dùng kline 1D để tính cả hai từ cùng nguồn dữ liệu)
         let now = chrono::Utc::now().timestamp_millis();
         let mut symbols_to_fetch_atr = Vec::new();
         let mut atr_map = HashMap::new();
-        let mut yesterday_vol_map = HashMap::new();
+        // vol_change_map: vol_change_24h_pct tính từ kline (calendar day), nhất quán với atr data.
+        // Không dùng ticker rolling 24h để tránh so sánh táo với cam.
+        let mut vol_change_map: HashMap<String, f64> = HashMap::new();
         {
             let cache = self.atr_cache.read().await;
             for sym in &top_symbols {
-                if let Some((atr_val, y_vol, ts)) = cache.get(sym) {
+                if let Some((atr_val, vol_chg, ts)) = cache.get(sym) {
                     if now - ts < ATR_CACHE_TTL_MS {
                         atr_map.insert(sym.clone(), *atr_val);
-                        yesterday_vol_map.insert(sym.clone(), *y_vol);
+                        vol_change_map.insert(sym.clone(), *vol_chg);
                         continue;
                     }
                 }
@@ -277,10 +283,17 @@ impl MetadataManager {
                     if candles.len() < 14 {
                         cache_write.insert(sym.clone(), (-1.0, 0.0, now));
                         atr_map.insert(sym.clone(), -1.0);
-                        yesterday_vol_map.insert(sym, 0.0);
+                        vol_change_map.insert(sym, 0.0);
                         continue;
                     }
+                    // vol_change: so sánh nến hôm nay vs hôm qua — cùng nguồn kline, không lẫn rolling ticker.
+                    let today_vol = candles[candles.len() - 1].quote_volume;
                     let yesterday_vol = candles[candles.len() - 2].quote_volume;
+                    let vol_change_24h_pct = if yesterday_vol > 0.0 {
+                        (today_vol - yesterday_vol) / yesterday_vol * 100.0
+                    } else {
+                        0.0
+                    };
                     let mut tr_sum = 0.0;
                     let mut valid_tr_count = 0;
                     for i in 1..candles.len() {
@@ -299,9 +312,9 @@ impl MetadataManager {
                     } else {
                         0.0
                     };
-                    cache_write.insert(sym.clone(), (atr_pct, yesterday_vol, now));
+                    cache_write.insert(sym.clone(), (atr_pct, vol_change_24h_pct, now));
                     atr_map.insert(sym.clone(), atr_pct);
-                    yesterday_vol_map.insert(sym, yesterday_vol);
+                    vol_change_map.insert(sym, vol_change_24h_pct);
                 }
             }
         }
@@ -324,12 +337,8 @@ impl MetadataManager {
                 } else {
                     0.0
                 };
-                let y_vol = *yesterday_vol_map.get(&r.symbol).unwrap_or(&0.0);
-                let volume_change_24h_pct = if y_vol > 0.0 {
-                    (r.vol - y_vol) / y_vol * 100.0
-                } else {
-                    0.0
-                };
+                // vol_change từ kline 1D (calendar day vs calendar day) — nhất quán, không lẫn rolling ticker.
+                let volume_change_24h_pct = *vol_change_map.get(&r.symbol).unwrap_or(&0.0);
                 let funding_rate = *funding_map.get(&r.symbol).unwrap_or(&0.0);
                 let volatility = *atr_map.get(&r.symbol).unwrap_or(&-1.0);
                 UniverseCandidate {
@@ -353,11 +362,14 @@ impl MetadataManager {
             })
             .collect();
 
+        // Sort by OI và áp ngưỡng OI tối thiểu ($20M) — loại coin thiếu open interest thật.
+        // OI thấp = ít vị thế futures thật → dễ bị manipulate, không phù hợp hệ thống.
         candidates.sort_by(|a, b| {
             b.open_interest
                 .partial_cmp(&a.open_interest)
                 .unwrap_or(Ordering::Equal)
         });
+        candidates.retain(|c| c.open_interest >= MIN_OPEN_INTEREST_USD);
         candidates.truncate(OI_FILTER_LIMIT);
 
         // 8. Final Scoring Logic
@@ -399,6 +411,28 @@ impl MetadataManager {
             .get((sorted_fundings.len() as f64 * 0.90) as usize)
             .unwrap_or(&0.001);
 
+        // ATR Percentile — tính relative volatility trong tập candidates thay vì dùng ngưỡng tuyệt đối.
+        // Ngưỡng 2-8% sai trong bear/volatile market khi phần lớn coin có ATR 5-15%.
+        // Logic: P20-P70 là vùng volatility lý tưởng (đủ biên độ trade, không quá rủi ro).
+        let mut sorted_atrs: Vec<f64> = candidates
+            .iter()
+            .filter(|c| c.volatility > 0.0)
+            .map(|c| c.volatility)
+            .collect();
+        sorted_atrs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        let atr_p20 = sorted_atrs
+            .get((sorted_atrs.len() as f64 * 0.20) as usize)
+            .copied()
+            .unwrap_or(0.02);
+        let atr_p70 = sorted_atrs
+            .get((sorted_atrs.len() as f64 * 0.70) as usize)
+            .copied()
+            .unwrap_or(0.08);
+        let atr_p95 = sorted_atrs
+            .get((sorted_atrs.len() as f64 * 0.95) as usize)
+            .copied()
+            .unwrap_or(0.20);
+
         let normalize = |val: f64, min: f64, max: f64| -> f64 {
             if (max - min).abs() < f64::EPSILON {
                 50.0
@@ -407,23 +441,30 @@ impl MetadataManager {
             }
         };
 
+        let atr_percentile_score = |v: f64| -> f64 {
+            if v < 0.0 {
+                50.0 // không có dữ liệu → neutral
+            } else if v < atr_p20 {
+                // Quá thấp: thiếu biên độ trade — linear từ 0 đến 80
+                (v / atr_p20) * 80.0
+            } else if v <= atr_p70 {
+                // Sweet spot: đủ biên độ, không quá rủi ro
+                100.0
+            } else if v <= atr_p95 {
+                // Quá volatile: linear xuống từ 100 về 20
+                100.0 - ((v - atr_p70) / (atr_p95 - atr_p70)) * 80.0
+            } else {
+                // Extreme: cực kỳ nguy hiểm
+                0.0
+            }
+        };
+
         for (i, c) in candidates.iter_mut().enumerate() {
             c.vol_score = normalize(log_vols[i], min_log_vol, max_log_vol);
             c.oi_score = normalize(log_ois[i], min_log_oi, max_log_oi);
             c.oi_change_score = normalize(c.oi_change_24h_pct, min_oi_chg, max_oi_chg);
             c.vol_change_score = normalize(c.volume_change_24h_pct, min_vol_chg, max_vol_chg);
-            let v = c.volatility;
-            c.atr_score = if v < 0.0 {
-                50.0
-            } else if v < ATR_SWEET_MIN {
-                (v / ATR_SWEET_MIN) * 100.0
-            } else if v <= ATR_SWEET_MAX {
-                100.0
-            } else if v <= ATR_HIGH_THRESH {
-                100.0 - ((v - ATR_SWEET_MAX) / (ATR_HIGH_THRESH - ATR_SWEET_MAX)) * 100.0
-            } else {
-                0.0
-            };
+            c.atr_score = atr_percentile_score(c.volatility);
             c.fund_score = if c.funding_rate <= p10_val || c.funding_rate >= p90_val {
                 0.0
             } else {

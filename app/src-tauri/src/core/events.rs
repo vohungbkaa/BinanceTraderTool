@@ -36,6 +36,10 @@ pub enum MarketEvent {
         progress: f64,
         message: String,
     },
+    LiveFeedReady {
+        stream_count: usize,
+        timestamp: i64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
