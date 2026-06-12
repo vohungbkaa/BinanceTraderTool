@@ -33,7 +33,7 @@ mod smoke_tests {
                 open_time: 1716960000,
                 close_time: 1716960899,
                 open: 100.0, high: 110.0, low: 90.0, close: 105.0,
-                volume: 500.0, is_closed: true,
+                volume: 500.0, quote_volume: 0.0, taker_buy_volume: 0.0, is_closed: true,
             },
             indicators: Indicators {
                 ema20: Some(102.5), ema50: Some(101.0), ema200: Some(100.0),
@@ -91,6 +91,8 @@ mod smoke_tests {
                 low: 90.0 + i as f64,
                 close: 100.0 + i as f64,
                 volume: 10.0,
+                quote_volume: 0.0,
+                taker_buy_volume: 0.0,
                 is_closed: true,
             };
             let inds = engine.process(&candle);

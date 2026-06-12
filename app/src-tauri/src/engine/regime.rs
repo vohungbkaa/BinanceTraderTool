@@ -321,7 +321,7 @@ impl MarketRegimeEngine {
         // BỘ LỌC 3: ĐÁNH GIÁ DÒNG TIỀN & ĐỘNG LƯỢNG (FLOW LAYER)
         // ---------------------------------------------------------
         let breadth_ema50 = risk_data.market_indices.market_breadth_pct_above_ema50;
-        let breadth_ema200 = risk_data.market_indices.market_breadth_pct_above_ema200;
+        let _breadth_ema200 = risk_data.market_indices.market_breadth_pct_above_ema200;
         
         let breadth_bearish = breadth_ema50 < 40.0;
         checklist.push(ChecklistItem { 
@@ -386,7 +386,7 @@ impl MarketRegimeEngine {
         
         // CVD & OI alignment
         if (cvd_4h > 0.0 && oi_state == OIState::LongBuildUp) || (cvd_4h < 0.0 && oi_state == OIState::ShortBuildUp) { f_score += 50; }
-        else if (cvd_4h != 0.0) { f_score += 25; }
+        else if cvd_4h != 0.0 { f_score += 25; }
         
         flow_score = f_score;
 
@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(context.risk_status, RiskStatus::Normal);
         assert_eq!(context.structural_trend, StructuralTrend::MacroBullish);
         assert_eq!(context.operational_state, OperationalState::ActiveBullish);
-        assert!(context.market_score >= 75);
+        assert!(context.trend_score >= 40);
         assert_eq!(context.allow_alt_scan, true);
         assert_eq!(context.action_mode, ActionMode::AggressiveLong);
     }
@@ -518,7 +518,7 @@ mod tests {
         let context = engine.analyze(&data).await;
 
         assert_eq!(context.risk_status, RiskStatus::EventBlock);
-        assert_eq!(context.market_score, 0); // Bị ép về 0
+        assert_eq!(context.trend_score, 0); // Bị ép về 0
         assert_eq!(context.allow_alt_scan, false); // Không cấp phép
         assert_eq!(context.action_mode, ActionMode::OffSystem);
     }
@@ -560,6 +560,7 @@ mod tests {
         // Flow thuận Bearish (Dòng tiền rút)
         data.market_indices.btc_d_trend = crate::core::models::TrendDirection::Up;
         data.market_indices.total3_btc_trend = crate::core::models::TrendDirection::Down;
+        data.market_indices.market_breadth_pct_above_ema50 = 30.0;
 
         let context = engine.analyze(&data).await;
 

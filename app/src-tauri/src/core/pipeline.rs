@@ -318,18 +318,41 @@ impl DataPipeline {
 
     /// Backfilling dữ liệu nến lịch sử để khởi tạo Indicators.
     async fn perform_warmup(&mut self) -> Result<()> {
-        info!("Performing warm-up...");
+        info!("Performing warm-up with Batching and Rate Limiting...");
         let timeframes = crate::core::config::AppConfig::load().timeframes;
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(20));
+        
+        let (candle_tx, mut candle_rx) = mpsc::channel::<NormalizedCandleData>(5000);
+        let db_clone = self.db.clone();
+        
+        let db_writer_handle = tokio::spawn(async move {
+            let mut batch = Vec::new();
+            while let Some(data) = candle_rx.recv().await {
+                batch.push(data);
+                if batch.len() >= 100 {
+                    let _ = db_clone.insert_closed_candles_batch(&batch).await;
+                    batch.clear();
+                }
+            }
+            if !batch.is_empty() {
+                let _ = db_clone.insert_closed_candles_batch(&batch).await;
+            }
+        });
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(40));
         let mut join_handles = Vec::new();
         let total_steps = timeframes.len() * self.symbols.len();
         let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        for tf in timeframes {
+        let mut index = 0;
+        for tf in &timeframes {
             for symbol in &self.symbols {
-                let (s, t, d, r, i, c, h) = (symbol.clone(), tf.clone(), self.db.clone(), self.rest_client.clone(), self.indicator_engine.clone(), completed.clone(), self.app_handle.clone());
+                let (s, t, d, r, i, c, h, tx) = (symbol.clone(), tf.clone(), self.db.clone(), self.rest_client.clone(), self.indicator_engine.clone(), completed.clone(), self.app_handle.clone(), candle_tx.clone());
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
+                let delay_ms = (index % 40) * 20; // Staggered delay up to 800ms to avoid burst
+                index += 1;
+                
                 join_handles.push(tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms as u64)).await;
                     let _permit = permit;
                     let last = d.get_last_update_time(&s, &t).await.unwrap_or(0);
                     let interval = timeframe_to_ms(&t);
@@ -339,7 +362,7 @@ impl DataPipeline {
                             let mut engine = i.lock().await;
                             for k in klines {
                                 let inds = engine.process(&k);
-                                let _ = d.insert_closed_candle(&NormalizedCandleData { candle: k, indicators: inds, ..Default::default() }).await;
+                                let _ = tx.send(NormalizedCandleData { candle: k, indicators: inds, ..Default::default() }).await;
                             }
                         }
                     } else {
@@ -354,6 +377,9 @@ impl DataPipeline {
             }
         }
         for handle in join_handles { let _ = handle.await; }
+        
+        drop(candle_tx);
+        let _ = db_writer_handle.await;
 
         // Multi-timeframe Priming
         let tfs = ["1d", "4h", "15m"];

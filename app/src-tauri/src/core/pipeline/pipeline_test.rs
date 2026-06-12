@@ -21,6 +21,8 @@ mod tests {
                 "l": "67500.0",
                 "c": "68200.0",
                 "v": "100.5",
+                "q": "6800000.0",
+                "V": "50.0",
                 "x": true
             }
         }"#;
@@ -30,7 +32,7 @@ mod tests {
         let (sys_tx, _) = mpsc::channel(1);
         let client = BinanceWsClient::new(tx, sys_tx);
         let v: serde_json::Value = serde_json::from_str(raw_json).unwrap();
-        let normalized = client.parse_kline(v).unwrap();
+        let normalized = client.parse_kline(v).await.unwrap();
 
 
         // 3. Assert dữ liệu

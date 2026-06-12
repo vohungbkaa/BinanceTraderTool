@@ -62,120 +62,129 @@ impl BinanceWsClient {
     }
 
     pub async fn run(&self) -> Result<()> {
-        // Mở kết nối với 1 stream mồi để Binance xác nhận đây là kết nối hợp lệ thuộc nhánh /market
-        let initial_stream = "btcusdt@markPrice"; 
-        let url = format!("{}{}", BINANCE_WS_BASE_URL, initial_stream);
-        
-        tracing::info!("[WS] ATTEMPTING CONNECTION TO BASE URL: {}", url);
+        let mut prev_stream_count = 0;
+        let mut connection_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let mut cancel_tx = tokio::sync::broadcast::channel::<()>(1).0;
 
         loop {
-            match connect_async(&url).await {
-                Ok((ws_stream, _)) => {
-                    tracing::info!("[WS] SUCCESS: Connected to Binance Market Stream!");
-                    let (mut write, mut read) = ws_stream.split();
-
-                    // Gửi payload SUBSCRIBE với danh sách stream đã chia nhỏ để tránh Limit của Binance
-                    let all_streams = self.get_all_streams().await;
-                    tracing::info!("[WS] Registering {} streams dynamically...", all_streams.len());
-
-                    let mut req_id = 1;
-                    for chunk in all_streams.chunks(200) {
-                        let subscribe_msg = serde_json::json!({
-                            "method": "SUBSCRIBE",
-                            "params": chunk,
-                            "id": req_id
-                        });
-                        
-                        if let Err(e) = write.send(Message::Text(subscribe_msg.to_string().into())).await {
-                            tracing::error!("[WS] Failed to send SUBSCRIBE payload: {}", e);
-                        }
-                        req_id += 1;
-                        tokio::time::sleep(Duration::from_millis(500)).await; 
-                    }
-
-                    // 1. Giới hạn 24 giờ của Binance
-                    let connection_time = chrono::Utc::now();
+            let all_streams = self.get_all_streams().await;
+            if all_streams.len() != prev_stream_count && !all_streams.is_empty() {
+                tracing::info!("[WS] Stream count changed to {}. Reconnecting all WS...", all_streams.len());
+                
+                let _ = cancel_tx.send(());
+                for handle in connection_handles.drain(..) {
+                    let _ = handle.await;
+                }
+                
+                let (new_cancel_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+                cancel_tx = new_cancel_tx;
+                
+                // Binance cho phép 200 streams/connection. Chia thành chunk 150 để an toàn.
+                let chunks: Vec<Vec<String>> = all_streams.chunks(150).map(|c| c.to_vec()).collect();
+                
+                for (idx, chunk) in chunks.into_iter().enumerate() {
+                    let mut rx = cancel_tx.subscribe();
+                    let tx = self.event_tx.clone();
                     
-                    loop {
-                        // Restart kết nối trước khi chạm ngưỡng 24h (ở đây an toàn lấy 23.5h)
-                        if chrono::Utc::now().signed_duration_since(connection_time).num_hours() >= 23 {
-                            tracing::info!("[WS] 23 hours elapsed. Proactively reconnecting to avoid Binance 24h force-drop...");
-                            break;
-                        }
-
-                        match tokio::time::timeout(Duration::from_secs(60), read.next()).await {
-                            Ok(Some(Ok(Message::Text(text)))) => {
-                                self.handle_message(text.as_str()).await;
-                            }
-                            Ok(Some(Ok(Message::Ping(ping_data)))) => {
-                                tracing::debug!("[WS] Received Ping from Binance, sending explicit Pong.");
-                                if let Err(e) = write.send(Message::Pong(ping_data)).await {
-                                    tracing::error!("[WS] Failed to send Pong: {}", e);
+                    // Endpoint kết hợp: Gắn trực tiếp params vào URL. Binance Futures dùng dấu '/' để phân cách các stream.
+                    let stream_params = chunk.join("/");
+                    let url = format!("wss://fstream.binance.com/stream?streams={}", stream_params);
+                    
+                    let handle = tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                _ = rx.recv() => {
+                                    break; // Nhận tín hiệu hủy từ vòng lặp chính
                                 }
+                                _ = async {
+                                    match connect_async(&url).await {
+                                        Ok((ws_stream, _)) => {
+                                            tracing::info!("[WS-{}] Connected to {} streams via URL.", idx, chunk.len());
+                                            let (mut write, mut read) = ws_stream.split();
+                                            
+                                            // Không cần gửi message SUBSCRIBE vì đã khai báo trên URL.
+
+                                            let connection_time = chrono::Utc::now();
+                                            loop {
+                                                if chrono::Utc::now().signed_duration_since(connection_time).num_hours() >= 23 {
+                                                    tracing::info!("[WS-{}] 23h elapsed. Proactively reconnecting...", idx);
+                                                    break;
+                                                }
+
+                                                match tokio::time::timeout(Duration::from_secs(60), read.next()).await {
+                                                    Ok(Some(Ok(Message::Text(text)))) => {
+                                                        Self::process_message(text.as_str(), &tx).await;
+                                                    }
+                                                    Ok(Some(Ok(Message::Ping(ping_data)))) => {
+                                                        // Tungstenite split() không tự pong. Phải gửi thủ công.
+                                                        if let Err(e) = write.send(Message::Pong(ping_data)).await {
+                                                            tracing::error!("[WS-{}] Failed to send Pong: {}", idx, e);
+                                                            break;
+                                                        }
+                                                    }
+                                                    Ok(Some(Err(e))) => {
+                                                        tracing::error!("[WS-{}] Read error: {}", idx, e);
+                                                        break;
+                                                    }
+                                                    Ok(None) => {
+                                                        tracing::warn!("[WS-{}] Stream closed by server.", idx);
+                                                        break;
+                                                    }
+                                                    Err(_) => {
+                                                        tracing::warn!("[WS-{}] Connection timed out (60s no data).", idx);
+                                                        break;
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("[WS-{}] Connection failed: {}", idx, e);
+                                            tokio::time::sleep(Duration::from_secs(5)).await;
+                                        }
+                                    }
+                                } => {}
                             }
-                            Ok(Some(Err(e))) => {
-                                tracing::error!("[WS] Read error: {}", e);
-                                break;
-                            }
-                            Ok(None) => {
-                                tracing::warn!("[WS] Stream closed by server.");
-                                break;
-                            }
-                            Err(_) => {
-                                tracing::warn!("[WS] Connection timed out (No data for 60s).");
-                                break;
-                            }
-                            _ => {}
+                            tokio::time::sleep(Duration::from_secs(2)).await;
                         }
-                    }
+                    });
+                    connection_handles.push(handle);
                 }
-                Err(e) => {
-                    tracing::error!("[WS] Connection failed: {}. Retrying in 5s...", e);
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
+                
+                prev_stream_count = all_streams.len();
             }
-            tracing::info!("[WS] Reconnecting...");
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 
-    async fn handle_message(&self, payload: &str) {
+    async fn process_message(payload: &str, tx: &mpsc::Sender<MarketEvent>) {
         if let Ok(v) = serde_json::from_str::<Value>(payload) {
-            // Log response from SUBSCRIBE
             if v.get("result").is_some() && v.get("id").is_some() {
-                tracing::info!("[WS] Received subscription confirmation: {}", payload);
+                tracing::info!("[WS] Received subscription confirmation");
                 return;
             }
 
-            // [QUAN TRỌNG] Combined Streams bọc dữ liệu trong "data"
+            // Với endpoint /ws và SUBSCRIBE, message không có "data" wrapper unless we use /stream
+            // Nên ta linh hoạt lấy từ "data" hoặc dùng root
             let data = v.get("data").unwrap_or(&v);
 
             if data["e"] == "kline" {
-                if let Some(normalized) = self.parse_kline(data.clone()).await {
+                if let Some(normalized) = Self::parse_kline_static(data.clone()) {
                     let k = &data["k"];
                     let is_closed = k["x"].as_bool().unwrap_or(false);
 
-                    if is_closed {
-                         tracing::info!("[WS KLINE CLOSED] {} | {} | Price: {} | Vol: {}", 
-                            normalized.candle.symbol, 
-                            normalized.candle.timeframe, 
-                            normalized.candle.close,
-                            normalized.candle.volume
-                        );
-                    }
-                    
                     let event = if is_closed {
                         MarketEvent::CandleClosed(normalized)
                     } else {
                         MarketEvent::CandleUpdated(normalized)
                     };
-                    let _ = self.event_tx.send(event).await;
+                    let _ = tx.send(event).await;
                 }
             }
             else if data["e"] == "openInterestUpdate" {
                 let symbol = data["s"].as_str().unwrap_or("").to_string();
                 let oi = data["o"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-                let _ = self.event_tx.send(MarketEvent::DepthUpdated {
+                let _ = tx.send(MarketEvent::DepthUpdated {
                     symbol, is_liquidation: false, price: 0.0, value_usd: oi, 
                     timestamp: data["E"].as_i64().unwrap_or(0),
                 }).await;
@@ -188,7 +197,7 @@ impl BinanceWsClient {
                             "forceOrder" => {
                                 let amount = item["o"]["q"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                                 let price = item["o"]["p"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-                                let _ = self.event_tx.send(MarketEvent::DepthUpdated {
+                                let _ = tx.send(MarketEvent::DepthUpdated {
                                     symbol: item["o"]["s"].as_str().unwrap_or("").to_string(),
                                     is_liquidation: true, price, value_usd: amount * price,
                                     timestamp: item["E"].as_i64().unwrap_or(0),
@@ -199,12 +208,12 @@ impl BinanceWsClient {
                                 let funding_rate = item["r"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                                 let mark_price = item["p"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                                 if symbol == "BTCDOMUSDT" {
-                                    let _ = self.event_tx.send(MarketEvent::FundingUpdated {
+                                    let _ = tx.send(MarketEvent::FundingUpdated {
                                         symbol, funding_rate: mark_price, 
                                         timestamp: item["E"].as_i64().unwrap_or(0),
                                     }).await;
                                 } else {
-                                    let _ = self.event_tx.send(MarketEvent::FundingUpdated {
+                                    let _ = tx.send(MarketEvent::FundingUpdated {
                                         symbol, funding_rate, 
                                         timestamp: item["E"].as_i64().unwrap_or(0),
                                     }).await;
@@ -219,6 +228,10 @@ impl BinanceWsClient {
     }
 
     pub async fn parse_kline(&self, v: Value) -> Option<NormalizedCandleData> {
+        Self::parse_kline_static(v)
+    }
+
+    fn parse_kline_static(v: Value) -> Option<NormalizedCandleData> {
         let symbol = v["s"].as_str()?.to_string();
         let k = &v["k"];
         let candle = super::models::Candle {

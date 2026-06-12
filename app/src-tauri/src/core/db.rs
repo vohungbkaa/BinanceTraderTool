@@ -16,6 +16,9 @@ impl Database {
             .await
             .context("Failed to connect to SQLite")?;
 
+        sqlx::query("PRAGMA journal_mode=WAL;").execute(&pool).await?;
+        sqlx::query("PRAGMA synchronous=NORMAL;").execute(&pool).await?;
+
         let db = Self { pool };
         db.run_migrations().await?;
         Ok(db)
@@ -221,6 +224,63 @@ impl Database {
         .bind(data.metadata.is_warmup)
         .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    /// Lưu danh sách nến (Batch) vào DB
+    pub async fn insert_closed_candles_batch(&self, batch: &[NormalizedCandleData]) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        for data in batch {
+            let open_time_str = chrono::DateTime::from_timestamp_millis(data.candle.open_time)
+                .map(|dt| dt.with_timezone(&chrono::Local).format("%d:%m:%Y %H:%M:%S").to_string())
+                .unwrap_or_default();
+            let close_time_str = chrono::DateTime::from_timestamp_millis(data.candle.close_time)
+                .map(|dt| dt.with_timezone(&chrono::Local).format("%d:%m:%Y %H:%M:%S").to_string())
+                .unwrap_or_default();
+
+            sqlx::query(
+                "INSERT OR REPLACE INTO closed_candles (
+                    symbol, timeframe, open_time, close_time, open_time_str, close_time_str,
+                    open, high, low, close, volume,
+                    ema20, ema50, ema200, atr14, adx14, plus_di, minus_di, structure,
+                    oi_change_pct, range_24h_pct, range_p40_90d, atr_surge_ratio, is_warmup
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
+            )
+            .bind(&data.candle.symbol)
+            .bind(&data.candle.timeframe)
+            .bind(data.candle.open_time)
+            .bind(data.candle.close_time)
+            .bind(open_time_str)
+            .bind(close_time_str)
+            .bind(data.candle.open)
+            .bind(data.candle.high)
+            .bind(data.candle.low)
+            .bind(data.candle.close)
+            .bind(data.candle.volume)
+            .bind(data.indicators.ema20)
+            .bind(data.indicators.ema50)
+            .bind(data.indicators.ema200)
+            .bind(data.indicators.atr14)
+            .bind(data.indicators.adx14)
+            .bind(data.indicators.plus_di)
+            .bind(data.indicators.minus_di)
+            .bind(&data.indicators.structure)
+            .bind(data.microstructure.oi_change_4h_pct)
+            .bind(data.range_24h_pct)
+            .bind(data.range_p40_90d)
+            .bind(data.atr_surge_ratio)
+            .bind(data.metadata.is_warmup)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
 
         Ok(())
     }
