@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { useMarketStore } from '../../stores/market';
+import { storeToRefs } from 'pinia';
+
+const marketStore = useMarketStore();
+const { timeframes: allowedTimeframes } = storeToRefs(marketStore);
 
 // Types matching the Rust backend
 interface UniverseCandidate {
@@ -141,23 +146,30 @@ interface DbCandlesResponse {
 const dbCandles = ref<NormalizedCandleData[]>([]);
 const dbCandlesTotal = ref(0);
 const isLoadingCandles = ref(false);
-const candleForm = ref({
-  symbol: 'BTCUSDT',
-  timeframe: '15m',
-  limit: 100
-});
+const currentRequestId = ref(0);
 
 // Column-specific filters for Candles
 const filterCandles = ref({
-  symbol: '', openTime: '', open: '', high: '', low: '', close: '', volume: '',
+  symbol: '', 
+  timeframe: '',
+  openTime: '', open: '', high: '', low: '', close: '', volume: '',
   ema20: '', ema50: '', ema200: '', atr14: '', adx14: '', structure: '',
   oi: '', funding: '', cvd: '', liq: '',
   bEma50: '', bEma200: '', range: ''
 });
 
+// Watch symbol and timeframe filters to trigger database reload (Backend search)
+let debounceTimeout: number | undefined;
+watch(() => [filterCandles.value.symbol, filterCandles.value.timeframe], () => {
+  // Clear local data immediately so user knows a search is in progress
+  dbCandles.value = [];
+  clearTimeout(debounceTimeout);
+  debounceTimeout = window.setTimeout(() => { loadDbCandles(); }, 400);
+});
+
 const filteredDbCandles = computed(() => {
   return dbCandles.value.filter(row => {
-    if (filterCandles.value.symbol && !row.candle.symbol.toLowerCase().includes(filterCandles.value.symbol.toLowerCase())) return false;
+    // Local filter for columns other than symbol/timeframe (which are handled by backend)
     if (filterCandles.value.openTime && !formatDate(row.candle.open_time).includes(filterCandles.value.openTime)) return false;
     if (!numFilter(row.candle.open, filterCandles.value.open)) return false;
     if (!numFilter(row.candle.high, filterCandles.value.high)) return false;
@@ -202,22 +214,33 @@ const loadTopAltcoins = async (forceRefresh = false) => {
 };
 
 const loadDbCandles = async () => {
-  if (!candleForm.value.symbol) return;
+  const requestId = ++currentRequestId.value;
   isLoadingCandles.value = true;
+  // Clear data immediately to show we are searching
+  dbCandles.value = [];
+  
   try {
-    const response = await invoke<DbCandlesResponse>('get_db_candles', {
-      symbol: candleForm.value.symbol.toUpperCase(),
-      timeframe: candleForm.value.timeframe,
-      limit: candleForm.value.limit
+    const response = await invoke<DbCandlesResponse>("get_db_candles", {
+      symbol: filterCandles.value.symbol.trim().toUpperCase(),
+      timeframe: filterCandles.value.timeframe,
+      limit: 500
     });
-    dbCandles.value = response.data;
-    dbCandlesTotal.value = response.total;
+    
+    // Only update if this is still the latest request
+    if (requestId === currentRequestId.value) {
+      dbCandles.value = response.data;
+      dbCandlesTotal.value = response.total;
+    }
   } catch (error) {
-    console.error('Failed to load DB candles:', error);
-    dbCandles.value = [];
-    dbCandlesTotal.value = 0;
+    if (requestId === currentRequestId.value) {
+      console.error("Failed to load DB candles:", error);
+      dbCandles.value = [];
+      dbCandlesTotal.value = 0;
+    }
   } finally {
-    isLoadingCandles.value = false;
+    if (requestId === currentRequestId.value) {
+      isLoadingCandles.value = false;
+    }
   }
 };
 
@@ -275,26 +298,26 @@ onMounted(() => {
               <th scope="col" class="w-[90px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-yellow-500 font-bold text-center">Score</th>
               <th scope="col" class="w-[160px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">24h Vol (USDT)</th>
               <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-blue-400">Vol Growth</th>
-              <th scope="col" class="w-[150px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Open Interest</th>
+              <th scope="col" class="w-[160px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Open Interest</th>
               <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-purple-400">OI Change</th>
               <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Volatility</th>
               <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Funding</th>
-              <th scope="col" class="w-[120px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-right">Last Price</th>
+              <th scope="col" class="w-[120px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Last Price</th>
               <th scope="col" class="w-[100px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-right">24h Change</th>
             </tr>
             <!-- Filter Inputs -->
             <tr class="bg-gray-800 sticky top-[44px] z-40 border-b border-gray-700">
-              <th class="px-1 py-1 sticky left-0 z-50 bg-gray-800"><input v-model="filterTop100.rank" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="<10"></th>
-              <th class="px-1 py-1 sticky left-[60px] z-50 bg-gray-800 shadow-[1px_0_0_#1f2937]"><input v-model="filterTop100.symbol" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter..."></th>
-              <th class="px-1 py-1"><input v-model="filterTop100.score" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none text-center" placeholder=">80"></th>
-              <th class="px-1 py-1"><input v-model="filterTop100.volume" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder=">10M"></th>
-              <th class="px-1 py-1"><input v-model="filterTop100.vol_growth" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder=">20"></th>
-              <th class="px-1 py-1"><input v-model="filterTop100.oi" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder=">20M"></th>
-              <th class="px-1 py-1"><input v-model="filterTop100.oi_change" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder=">10"></th>
-              <th class="px-1 py-1"><input v-model="filterTop100.volatility" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="<0.05"></th>
-              <th class="px-1 py-1"><input v-model="filterTop100.funding" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="Filter"></th>
-              <th class="px-1 py-1"><input v-model="filterTop100.price" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder="<1"></th>
-              <th class="px-1 py-1"><input v-model="filterTop100.change" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none" placeholder=">5"></th>
+              <th class="px-1 py-1 sticky left-0 z-50 bg-gray-800 border-b border-gray-700"><input v-model="filterTop100.rank" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="<10"></th>
+              <th class="px-1 py-1 sticky left-[60px] z-50 bg-gray-800 border-b border-gray-700 shadow-[1px_0_0_#1f2937]"><input v-model="filterTop100.symbol" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="Filter..."></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.score" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none text-center" placeholder=">80"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.volume" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">10M"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.vol_growth" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">20"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.oi" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">20M"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.oi_change" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">10"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.volatility" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="<0.05"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.funding" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="Filter"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.price" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="<1"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.change" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">5"></th>
             </tr>
           </thead>
           <tbody>
@@ -324,12 +347,7 @@ onMounted(() => {
           <h3 class="text-lg font-semibold text-white">Closed Candles (Local Database) <span class="text-sm font-normal text-gray-500 ml-2">({{ filteredDbCandles.length }} / {{ dbCandlesTotal }} records)</span></h3>
           <p class="text-sm text-gray-400">Querying historical data directly from SQLite.</p>
         </div>
-      </div>
-      <div class="flex gap-4 bg-gray-900/50 p-4 rounded-lg border border-gray-800 items-end">
-        <div><label class="block text-xs font-medium text-gray-400 mb-1">Symbol</label><input v-model="candleForm.symbol" type="text" class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md block w-40 p-2" placeholder="BTCUSDT"></div>
-        <div><label class="block text-xs font-medium text-gray-400 mb-1">Timeframe</label><select v-model="candleForm.timeframe" class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md block w-24 p-2"><option value="15m">15m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option></select></div>
-        <div><label class="block text-xs font-medium text-gray-400 mb-1">Limit</label><input v-model.number="candleForm.limit" type="number" class="bg-gray-800 border border-gray-700 text-white text-sm rounded-md block w-24 p-2"></div>
-        <button @click="loadDbCandles" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm rounded-md border border-gray-700 transition-colors">Refresh</button>
+        <button @click="loadDbCandles" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white text-sm rounded-md border border-gray-700 transition-colors">Force Refresh</button>
       </div>
 
       <div class="overflow-x-auto rounded-lg border border-gray-800 h-[650px] relative">
@@ -338,7 +356,8 @@ onMounted(() => {
             <!-- Header Names -->
             <tr>
               <th scope="col" class="w-[100px] px-2 py-3 sticky top-0 left-0 z-50 bg-gray-900 border-b border-gray-800">Symbol</th>
-              <th scope="col" class="w-[160px] px-2 py-3 sticky top-0 left-[100px] z-50 bg-gray-900 border-b border-gray-800 shadow-[1px_0_0_#1f2937]">Open Time</th>
+              <th scope="col" class="w-[80px] px-2 py-3 sticky top-0 left-[100px] z-50 bg-gray-900 border-b border-gray-800 shadow-[1px_0_0_#1f2937]">TF</th>
+              <th scope="col" class="w-[160px] px-2 py-3 sticky top-0 left-[180px] z-50 bg-gray-900 border-b border-gray-800 shadow-[1px_0_0_#1f2937]">Open Time</th>
               <th scope="col" class="w-[90px] px-2 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-right">Close</th>
               <th scope="col" class="w-[100px] px-2 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-right">Volume</th>
               <th scope="col" class="w-[80px] px-2 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-right">EMA20</th>
@@ -354,28 +373,35 @@ onMounted(() => {
               <th scope="col" class="w-[70px] px-2 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-right">Range</th>
             </tr>
             <!-- Filter Inputs -->
-            <tr class="bg-gray-800 sticky top-[44px] z-40 border-b border-gray-700">
-              <th class="px-1 py-1 sticky left-0 z-50 bg-gray-800 border-b border-gray-700"><input v-model="filterCandles.symbol" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="Filter..."></th>
-              <th class="px-1 py-1 sticky left-[100px] z-50 bg-gray-800 border-b border-gray-700 shadow-[1px_0_0_#1f2937]"><input v-model="filterCandles.openTime" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="Filter..."></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.close" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none text-right" placeholder=">1k"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.volume" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none text-right"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.ema20" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none text-right"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.ema50" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none text-right"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.ema200" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none text-right"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.atr14" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none text-right"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.adx14" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none text-right"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.structure" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none text-center"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.oi" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none text-right" placeholder=">0"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.funding" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none text-right"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.bEma50" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none text-right"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.bEma200" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none text-right"></th>
-              <th class="px-1 py-1"><input v-model="filterCandles.range" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1.5 py-1 outline-none text-right"></th>
+            <tr class="bg-gray-800 sticky top-[44px] z-40 border-b border-gray-700 text-[10px]">
+              <th class="px-1 py-1 sticky left-0 z-50 bg-gray-800 border-b border-gray-700"><input v-model="filterCandles.symbol" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none" placeholder="Search..."></th>
+              <th class="px-1 py-1 sticky left-[100px] z-50 bg-gray-800 border-b border-gray-700 shadow-[1px_0_0_#1f2937]">
+                <select v-model="filterCandles.timeframe" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none">
+                  <option value="">All</option>
+                  <option v-for="tf in allowedTimeframes" :key="tf" :value="tf">{{ tf }}</option>
+                </select>
+              </th>
+              <th class="px-1 py-1 sticky left-[180px] z-50 bg-gray-800 border-b border-gray-700 shadow-[1px_0_0_#1f2937]"><input v-model="filterCandles.openTime" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none" placeholder="Time..."></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.close" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right" placeholder=">1k"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.volume" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.ema20" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.ema50" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.ema200" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.atr14" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.adx14" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.structure" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-center"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.oi" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.funding" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.bEma50" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.bEma200" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
+              <th class="px-1 py-1"><input v-model="filterCandles.range" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 rounded px-1 py-1 outline-none text-right"></th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="row in filteredDbCandles" :key="row.candle.open_time + row.candle.symbol" class="border-b border-gray-800 hover:bg-gray-800/50">
               <td class="px-2 py-2 font-bold text-white bg-[#12161a] sticky left-0 z-10">{{ row.candle.symbol }}</td>
-              <td class="px-2 py-2 font-mono bg-[#12161a] sticky left-[100px] z-10 shadow-[1px_0_0_#1f2937] text-[10px]">{{ formatDate(row.candle.open_time) }}</td>
+              <td class="px-2 py-2 font-bold text-blue-400 bg-[#12161a] sticky left-[100px] z-10 shadow-[1px_0_0_#1f2937]">{{ row.candle.timeframe }}</td>
+              <td class="px-2 py-2 font-mono bg-[#12161a] sticky left-[180px] z-10 shadow-[1px_0_0_#1f2937] text-[10px]">{{ formatDate(row.candle.open_time) }}</td>
               <td class="px-2 py-2 text-right font-bold text-white">{{ formatNumber(row.candle.close) }}</td>
               <td class="px-2 py-2 text-right text-[10px] text-gray-400">{{ formatNumber(row.candle.volume) }}</td>
               <td class="px-2 py-2 text-right text-yellow-600/70">{{ formatNumber(row.indicators?.ema20) }}</td>
@@ -390,7 +416,15 @@ onMounted(() => {
               <td class="px-2 py-2 text-right text-teal-500 text-[10px]">{{ formatPct(row.market_indices?.market_breadth_pct_above_ema200) }}</td>
               <td class="px-2 py-2 text-right text-orange-400 text-[10px]">{{ formatPct(row.range_24h_pct) }}</td>
             </tr>
-            <tr v-if="filteredDbCandles.length === 0 && !isLoadingCandles"><td colspan="15" class="px-6 py-8 text-center text-gray-500">No data available.</td></tr>
+                        <tr v-if="isLoadingCandles">
+              <td colspan="16" class="px-6 py-12 text-center">
+                <div class="flex flex-col items-center gap-3">
+                  <div class="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                  <span class="text-sm text-blue-400 font-medium">Searching Database...</span>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="filteredDbCandles.length === 0 && !isLoadingCandles"><td colspan="16" class="px-6 py-8 text-center text-gray-500">No data available.</td></tr>
           </tbody>
         </table>
       </div>

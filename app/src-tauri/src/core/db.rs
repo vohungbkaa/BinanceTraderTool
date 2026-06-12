@@ -1,8 +1,8 @@
-use anyhow::{Context, Result};
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool, Row};
-use tracing::info;
-
-use super::models::{NormalizedCandleData};
+use anyhow::{Result, Context};
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::{SqlitePool, Row};
+use std::sync::Arc;
+use crate::core::models::{Candle, NormalizedCandleData};
 
 pub struct Database {
     pool: SqlitePool,
@@ -22,11 +22,9 @@ impl Database {
     }
 
     async fn run_migrations(&self) -> Result<()> {
-        info!("Running database migrations...");
-
-        // Bảng lưu cấu hình/danh sách Symbol
+        // Bảng lưu thông tin Altcoin cơ bản
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS symbol_config (
+            "CREATE TABLE IF NOT EXISTS altcoins (
                 symbol TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
                 listed_at INTEGER NOT NULL,
@@ -40,7 +38,6 @@ impl Database {
         // Bảng lưu nến đã đóng và toàn bộ bối cảnh (Confirmed Candles + Context)
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS closed_candles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
                 timeframe TEXT NOT NULL,
                 open_time INTEGER NOT NULL,
@@ -52,8 +49,6 @@ impl Database {
                 low REAL NOT NULL,
                 close REAL NOT NULL,
                 volume REAL NOT NULL,
-                
-                -- Indicators
                 ema20 REAL,
                 ema50 REAL,
                 ema200 REAL,
@@ -62,15 +57,12 @@ impl Database {
                 plus_di REAL,
                 minus_di REAL,
                 structure TEXT,
-
-                -- Risk & Context
                 oi_change_pct REAL,
                 range_24h_pct REAL,
                 range_p40_90d REAL,
                 atr_surge_ratio REAL,
                 is_warmup BOOLEAN NOT NULL,
-
-                UNIQUE(symbol, timeframe, open_time)
+                PRIMARY KEY (symbol, timeframe, open_time)
             );",
         )
         .execute(&self.pool)
@@ -162,7 +154,6 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
 
-        use sqlx::Row;
         let candidates = rows.into_iter().map(|r| {
             crate::core::metadata::UniverseCandidate {
                 symbol: r.get(0),
@@ -187,6 +178,7 @@ impl Database {
         Ok(candidates)
     }
 
+    /// Lưu nến đã đóng
     pub async fn insert_closed_candle(&self, data: &NormalizedCandleData) -> Result<()> {
         let open_time_str = chrono::DateTime::from_timestamp_millis(data.candle.open_time)
             .map(|dt| dt.with_timezone(&chrono::Local).format("%d:%m:%Y %H:%M:%S").to_string())
@@ -196,33 +188,12 @@ impl Database {
             .unwrap_or_default();
 
         sqlx::query(
-            r#"
-            INSERT INTO closed_candles (
+            "INSERT OR REPLACE INTO closed_candles (
                 symbol, timeframe, open_time, close_time, open_time_str, close_time_str,
                 open, high, low, close, volume,
                 ema20, ema50, ema200, atr14, adx14, plus_di, minus_di, structure,
-                oi_change_pct, range_24h_pct, range_p40_90d, atr_surge_ratio,
-                is_warmup
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
-            ON CONFLICT(symbol, timeframe, open_time) 
-            DO UPDATE SET 
-                close=excluded.close, 
-                structure=excluded.structure,
-                ema20=excluded.ema20,
-                ema50=excluded.ema50,
-                ema200=excluded.ema200,
-                atr14=excluded.atr14,
-                adx14=excluded.adx14,
-                plus_di=excluded.plus_di,
-                minus_di=excluded.minus_di,
-                oi_change_pct=excluded.oi_change_pct,
-                range_24h_pct=excluded.range_24h_pct,
-                range_p40_90d=excluded.range_p40_90d,
-                atr_surge_ratio=excluded.atr_surge_ratio,
-                open_time_str=excluded.open_time_str,
-                close_time_str=excluded.close_time_str
-            "#
+                oi_change_pct, range_24h_pct, range_p40_90d, atr_surge_ratio, is_warmup
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
         )
         .bind(&data.candle.symbol)
         .bind(&data.candle.timeframe)
@@ -301,19 +272,19 @@ impl Database {
             }
         }).collect();
         
-        data.reverse(); // Đảo lại theo thứ tự thời gian tăng dần
+        data.reverse(); 
         Ok(data)
     }
 
-    /// Tìm kiếm nến thô kèm chỉ báo kỹ thuật theo symbol (chấp nhận tìm kiếm một phần LIKE %symbol%)
+    /// Tìm kiếm nến kèm chỉ báo với cơ chế fuzzy match
     pub async fn search_candles_with_indicators(&self, search_term: &str, timeframe: &str, limit: usize) -> Result<Vec<crate::core::models::NormalizedCandleData>> {
         let pattern = format!("%{}%", search_term.to_uppercase());
         let rows = sqlx::query(
-            "SELECT symbol, timeframe, open_time, close_time, open, high, low, close, volume,
+            r#"SELECT symbol, timeframe, open_time, close_time, open, high, low, close, volume,
                     ema20, ema50, ema200, atr14, adx14, plus_di, minus_di, structure
              FROM closed_candles 
-             WHERE symbol LIKE ?1 AND timeframe = ?2 
-             ORDER BY open_time DESC LIMIT ?3"
+             WHERE symbol LIKE ?1 AND (?2 = "" OR timeframe = ?2) 
+             ORDER BY open_time DESC LIMIT ?3"#
         )
         .bind(pattern)
         .bind(timeframe)
@@ -353,7 +324,7 @@ impl Database {
             }
         }).collect();
         
-        data.reverse(); // Đảo lại theo thứ tự thời gian tăng dần
+        data.reverse(); 
         Ok(data)
     }
 
@@ -361,7 +332,7 @@ impl Database {
     pub async fn count_search_candles(&self, search_term: &str, timeframe: &str) -> Result<i64> {
         let pattern = format!("%{}%", search_term.to_uppercase());
         let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM closed_candles WHERE symbol LIKE ?1 AND timeframe = ?2"
+            r#"SELECT COUNT(*) FROM closed_candles WHERE symbol LIKE ?1 AND (?2 = "" OR timeframe = ?2)"#
         )
         .bind(pattern)
         .bind(timeframe)
