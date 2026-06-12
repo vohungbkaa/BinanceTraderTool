@@ -1,8 +1,8 @@
-use tauri::State;
 use crate::core::db::Database;
-use crate::core::rest::BinanceRestClient;
 use crate::core::metadata::MetadataManager;
-use serde::{Deserialize, Serialize};
+use crate::core::rest::BinanceRestClient;
+use serde::Serialize;
+use tauri::State;
 
 #[derive(Serialize)]
 pub struct DbCandlesResponse {
@@ -17,14 +17,16 @@ pub async fn get_db_candles(
     limit: usize,
     db: State<'_, std::sync::Arc<Database>>,
 ) -> Result<DbCandlesResponse, String> {
-    let data = db.search_candles_with_indicators(&symbol, &timeframe, limit)
+    let data = db
+        .search_candles_with_indicators(&symbol, &timeframe, limit)
         .await
         .map_err(|e| e.to_string())?;
-        
-    let total = db.count_search_candles(&symbol, &timeframe)
+
+    let total = db
+        .count_search_candles(&symbol, &timeframe)
         .await
         .unwrap_or(0);
-        
+
     Ok(DbCandlesResponse { data, total })
 }
 
@@ -36,7 +38,10 @@ pub async fn get_top_altcoins_metadata(
     let rest_client = BinanceRestClient::new();
     let manager = MetadataManager::new(rest_client);
 
-    let candidates = manager.get_universe_candidates(Some(&app_handle)).await.map_err(|e| e.to_string())?;
+    let candidates = manager
+        .get_universe_candidates(Some(&app_handle))
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Lưu vào DB để có thể truy xuất nhanh sau này
     let _ = db.save_universe_candidates(&candidates).await;
@@ -48,5 +53,7 @@ pub async fn get_top_altcoins_metadata(
 pub async fn get_stored_universe(
     db: State<'_, std::sync::Arc<Database>>,
 ) -> Result<Vec<crate::core::metadata::UniverseCandidate>, String> {
-    db.get_stored_universe_candidates().await.map_err(|e| e.to_string())
+    db.get_stored_universe_candidates()
+        .await
+        .map_err(|e| e.to_string())
 }

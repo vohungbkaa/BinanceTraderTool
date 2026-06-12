@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use super::models::NormalizedCandleData;
 use crate::engine::regime::MarketRegimeContext;
+use serde::{Deserialize, Serialize};
 
 use crate::engine::scanner::ScannerPayload;
 
@@ -9,7 +9,7 @@ use crate::engine::scanner::ScannerPayload;
 pub enum MarketEvent {
     CandleUpdated(NormalizedCandleData),
     CandleClosed(NormalizedCandleData),
-    
+
     // Sự kiện mới: Bối cảnh thị trường đã được cập nhật (Phase 1 phát ra)
     RegimeUpdated(MarketRegimeContext),
 

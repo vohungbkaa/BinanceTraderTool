@@ -34,10 +34,16 @@ impl AppConfig {
                 let default_val = serde_json::to_value(AppConfig::default()).unwrap();
                 if let Some(obj) = json_val.as_object_mut() {
                     if !obj.contains_key("altcoin_analysis_timeframe") {
-                        obj.insert("altcoin_analysis_timeframe".to_string(), default_val["altcoin_analysis_timeframe"].clone());
+                        obj.insert(
+                            "altcoin_analysis_timeframe".to_string(),
+                            default_val["altcoin_analysis_timeframe"].clone(),
+                        );
                     }
                     if !obj.contains_key("altcoin_count") {
-                        obj.insert("altcoin_count".to_string(), default_val["altcoin_count"].clone());
+                        obj.insert(
+                            "altcoin_count".to_string(),
+                            default_val["altcoin_count"].clone(),
+                        );
                     }
                     if !obj.contains_key("timeframes") {
                         obj.insert("timeframes".to_string(), default_val["timeframes"].clone());

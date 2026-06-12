@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use crate::engine::regime::{MarketRegimeContext, ActionMode};
 use crate::core::models::AltcoinSnapshot;
-use tracing::{info, warn};
+use crate::engine::regime::{ActionMode, MarketRegimeContext};
+use serde::{Deserialize, Serialize};
+use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RsRating {
@@ -48,34 +48,37 @@ pub struct ScannerPayload {
     pub shortlist: Vec<ScanCandidate>,
 }
 
-pub struct ScannerEngine {
-    rest_client: crate::core::rest::BinanceRestClient,
-    indicator_engine: std::sync::Arc<tokio::sync::Mutex<crate::core::indicators::IndicatorEngine>>,
-}
+pub struct ScannerEngine;
 
 impl ScannerEngine {
     pub fn new(
-        rest_client: crate::core::rest::BinanceRestClient,
-        indicator_engine: std::sync::Arc<tokio::sync::Mutex<crate::core::indicators::IndicatorEngine>>,
+        _rest_client: crate::core::rest::BinanceRestClient,
+        _indicator_engine: std::sync::Arc<
+            tokio::sync::Mutex<crate::core::indicators::IndicatorEngine>,
+        >,
     ) -> Self {
-        Self { rest_client, indicator_engine }
+        Self
     }
 
     /// [TỐI ƯU CỰC ĐẠI] Lấy dữ liệu CHỈ TỪ DB (Closed Candles) kết hợp giá Live Ticker
     /// [TỐI ƯU CỰC ĐẠI] Lấy dữ liệu CHỈ TỪ DB (Closed Candles) kết hợp giá Live Ticker
     pub async fn fetch_real_snapshots(
-        &self, 
-        symbols: &[String], 
-        tickers_24h: &[serde_json::Value], 
+        &self,
+        symbols: &[String],
+        tickers_24h: &[serde_json::Value],
         db: std::sync::Arc<crate::core::db::Database>,
-        risk_manager: std::sync::Arc<tokio::sync::Mutex<crate::core::risk::RiskManager>>
+        risk_manager: std::sync::Arc<tokio::sync::Mutex<crate::core::risk::RiskManager>>,
     ) -> Vec<AltcoinSnapshot> {
         info!("ScannerEngine: Calculating snapshots from DB & Live Tickers...");
-        
+
         // Tạo HashMap để tra cứu nhanh ticker 24h
         let mut ticker_map = std::collections::HashMap::new();
         for t in tickers_24h {
-            if let (Some(sym), Some(price), Some(change)) = (t["symbol"].as_str(), t["lastPrice"].as_str(), t["priceChangePercent"].as_str()) {
+            if let (Some(sym), Some(price), Some(change)) = (
+                t["symbol"].as_str(),
+                t["lastPrice"].as_str(),
+                t["priceChangePercent"].as_str(),
+            ) {
                 if let (Ok(p), Ok(pct)) = (price.parse::<f64>(), change.parse::<f64>()) {
                     ticker_map.insert(sym.to_string(), (p, pct));
                 }
@@ -90,8 +93,14 @@ impl ScannerEngine {
             let oi_curr = risk.symbol_oi.get(sym).copied();
             let oi_prev = risk.symbol_oi_prev.get(sym).copied();
             let oi_change = if let (Some(c), Some(p)) = (oi_curr, oi_prev) {
-                if p > 0.0 { (c - p) / p * 100.0 } else { 0.0 }
-            } else { 0.0 };
+                if p > 0.0 {
+                    (c - p) / p * 100.0
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
             risk_data_map.insert(sym.clone(), (fr, oi_change));
         }
         drop(risk);
@@ -105,14 +114,24 @@ impl ScannerEngine {
             let db = db.clone();
             let live_data = ticker_map.get(&symbol).cloned();
             let alt_tf = alt_tf.clone();
-            let (funding_rate, oi_growth_4h_pct) = risk_data_map.get(&symbol).cloned().unwrap_or((0.0, 0.0));
+            let (funding_rate, oi_growth_4h_pct) =
+                risk_data_map.get(&symbol).cloned().unwrap_or((0.0, 0.0));
 
             tasks.push(tokio::spawn(async move {
                 if let Some((live_price, change_1d_pct)) = live_data {
                     // Lấy nến đóng gần nhất từ DB cho 15m, 4H, 1D (đã có sẵn Indicators)
-                    let data_15m = db.get_candles_with_indicators(&symbol, "15m", 1).await.unwrap_or_default();
-                    let data_4h = db.get_candles_with_indicators(&symbol, "4h", 2).await.unwrap_or_default();
-                    let data_1d = db.get_candles_with_indicators(&symbol, &alt_tf, 1).await.unwrap_or_default();
+                    let data_15m = db
+                        .get_candles_with_indicators(&symbol, "15m", 1)
+                        .await
+                        .unwrap_or_default();
+                    let data_4h = db
+                        .get_candles_with_indicators(&symbol, "4h", 2)
+                        .await
+                        .unwrap_or_default();
+                    let data_1d = db
+                        .get_candles_with_indicators(&symbol, &alt_tf, 1)
+                        .await
+                        .unwrap_or_default();
 
                     let mut snap = AltcoinSnapshot {
                         symbol: symbol.clone(),
@@ -127,28 +146,32 @@ impl ScannerEngine {
                     if let Some(d) = data_15m.last() {
                         snap.ema50_15m = d.indicators.ema50.unwrap_or(0.0);
                         snap.ema200_15m = d.indicators.ema200.unwrap_or(0.0);
-                        snap.change_15m_pct = (live_price - d.candle.close) / d.candle.close * 100.0;
+                        snap.change_15m_pct =
+                            (live_price - d.candle.close) / d.candle.close * 100.0;
                     }
 
                     // 2. Dữ liệu 4H
                     if let Some(d) = data_4h.last() {
                         snap.ema50_4h = d.indicators.ema50.unwrap_or(0.0);
                         snap.ema200_4h = d.indicators.ema200.unwrap_or(0.0);
-                        
+
                         if data_4h.len() >= 2 {
                             let ref_open = data_4h[0].candle.open;
                             snap.change_4h_pct = (live_price - ref_open) / ref_open * 100.0;
                         }
 
                         // Z-Score Volume 4H
-                        let candles_4h_raw = db.get_candles(&symbol, "4h", 20).await.unwrap_or_default();
+                        let candles_4h_raw =
+                            db.get_candles(&symbol, "4h", 20).await.unwrap_or_default();
                         if candles_4h_raw.len() >= 2 {
                             let vols: Vec<f64> = candles_4h_raw.iter().map(|c| c.volume).collect();
                             let mean_vol = vols.iter().sum::<f64>() / vols.len() as f64;
-                            let variance = vols.iter().map(|v| (v - mean_vol).powi(2)).sum::<f64>() / (vols.len() - 1).max(1) as f64;
+                            let variance = vols.iter().map(|v| (v - mean_vol).powi(2)).sum::<f64>()
+                                / (vols.len() - 1).max(1) as f64;
                             let std_dev = variance.sqrt();
                             if std_dev > 0.0 {
-                                snap.vol_growth_4h_zscore = (candles_4h_raw.last().unwrap().volume - mean_vol) / std_dev;
+                                snap.vol_growth_4h_zscore =
+                                    (candles_4h_raw.last().unwrap().volume - mean_vol) / std_dev;
                             }
                         }
                     }
@@ -159,7 +182,8 @@ impl ScannerEngine {
                     }
 
                     if snap.ema50_4h > 0.0 {
-                        snap.distance_to_ema50_4h_pct = (live_price - snap.ema50_4h) / snap.ema50_4h * 100.0;
+                        snap.distance_to_ema50_4h_pct =
+                            (live_price - snap.ema50_4h) / snap.ema50_4h * 100.0;
                     }
 
                     return Some(snap);
@@ -179,11 +203,16 @@ impl ScannerEngine {
 
     /// [SPEC 3] Tính toán Z-Score Relative Strength
     fn calculate_zscore(values: &[f64]) -> Vec<f64> {
-        if values.is_empty() { return vec![]; }
-        if values.len() == 1 { return vec![0.0]; }
+        if values.is_empty() {
+            return vec![];
+        }
+        if values.len() == 1 {
+            return vec![0.0];
+        }
 
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1).max(1) as f64;
+        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+            / (values.len() - 1).max(1) as f64;
         let std_dev = variance.sqrt();
 
         if std_dev == 0.0 {
@@ -194,28 +223,41 @@ impl ScannerEngine {
     }
 
     fn get_rating(rs_score: f64) -> RsRating {
-        if rs_score > 1.5 { RsRating::A }
-        else if rs_score > 0.5 { RsRating::B }
-        else if rs_score >= -0.5 { RsRating::C }
-        else { RsRating::D }
+        if rs_score > 1.5 {
+            RsRating::A
+        } else if rs_score > 0.5 {
+            RsRating::B
+        } else if rs_score >= -0.5 {
+            RsRating::C
+        } else {
+            RsRating::D
+        }
     }
 
     pub fn scan(
-        &self, 
-        context: &MarketRegimeContext, 
-        btc_change_1d: f64, 
-        btc_change_4h: f64, 
-        altcoins: &[AltcoinSnapshot]
+        &self,
+        context: &MarketRegimeContext,
+        btc_change_1d: f64,
+        btc_change_4h: f64,
+        altcoins: &[AltcoinSnapshot],
     ) -> Vec<ScanCandidate> {
-        
-        if !context.allow_alt_scan || context.action_mode == ActionMode::OffSystem || altcoins.is_empty() {
+        if !context.allow_alt_scan
+            || context.action_mode == ActionMode::OffSystem
+            || altcoins.is_empty()
+        {
             return vec![];
         }
 
         // 1. Tính toán Base Difference (Alt - BTC)
         let diffs_15m: Vec<f64> = altcoins.iter().map(|a| a.change_15m_pct - 0.0).collect(); // Giả định BTC 15m diff tạm thời
-        let diffs_1d: Vec<f64> = altcoins.iter().map(|a| a.change_1d_pct - btc_change_1d).collect();
-        let diffs_4h: Vec<f64> = altcoins.iter().map(|a| a.change_4h_pct - btc_change_4h).collect();
+        let diffs_1d: Vec<f64> = altcoins
+            .iter()
+            .map(|a| a.change_1d_pct - btc_change_1d)
+            .collect();
+        let diffs_4h: Vec<f64> = altcoins
+            .iter()
+            .map(|a| a.change_4h_pct - btc_change_4h)
+            .collect();
 
         // 2. Chuẩn hóa Z-Score
         let zscores_15m = Self::calculate_zscore(&diffs_15m);
@@ -227,7 +269,7 @@ impl ScannerEngine {
         // 3. Đánh giá từng Altcoin
         for (i, alt) in altcoins.iter().enumerate() {
             let is_flat_market = diffs_4h[i].abs() < 1.0 && diffs_1d[i].abs() < 2.0;
-            
+
             let mut final_rs = if is_flat_market {
                 ((zscores_4h[i] * 0.7) + (zscores_1d[i] * 0.3)) * 0.5
             } else {
@@ -235,19 +277,23 @@ impl ScannerEngine {
             };
 
             // [SPEC 4] Chỉnh trọng số RS nếu là Scalp Mode
-            if context.action_mode == ActionMode::ScalpLong || context.action_mode == ActionMode::ScalpShort {
+            if context.action_mode == ActionMode::ScalpLong
+                || context.action_mode == ActionMode::ScalpShort
+            {
                 final_rs = (zscores_15m[i] * 0.6) + (zscores_4h[i] * 0.4);
             }
-            
+
             let rating = Self::get_rating(final_rs);
             // Chỉnh lại rank_score để không bị chênh lệch scale giữa Z-Score và %
             // Cap oi_growth ở mức 10% (tránh làm lệch rank)
             let safe_oi = alt.oi_growth_4h_pct.clamp(-10.0, 10.0) / 10.0; // scale -1.0 to 1.0
-            
+
             // Funding Penalty: Phạt nếu Funding ngược hướng (crowded)
             let funding_skew = (alt.funding_rate * 100.0).clamp(-2.0, 2.0); // max 2% funding
-            
-            let mut rank_score = (final_rs * 0.5) + (alt.vol_growth_4h_zscore.clamp(-3.0, 3.0) * 0.3) + (safe_oi * 0.2);
+
+            let mut rank_score = (final_rs * 0.5)
+                + (alt.vol_growth_4h_zscore.clamp(-3.0, 3.0) * 0.3)
+                + (safe_oi * 0.2);
 
             let mut is_valid = false;
             let mut direction = "";
@@ -265,7 +311,7 @@ impl ScannerEngine {
                         reason = "RS Leader, Trend Bullish";
                         rank_score -= funding_skew; // Funding cao thì trừ điểm rank
                     }
-                },
+                }
                 ActionMode::ScalpLong => {
                     let good_rs = final_rs > 1.5; // Tập trung RS khung ngắn hạn
                     let crowded_long = alt.funding_rate > 0.0015;
@@ -274,7 +320,7 @@ impl ScannerEngine {
                         direction = "LONG";
                         reason = "Strong short-term RS for Scalping (15m)";
                     }
-                },
+                }
                 ActionMode::AggressiveShort => {
                     let price_below_ema = alt.price < alt.ema200_1d && alt.ema50_4h < alt.ema200_4h;
                     let weak_rs = rating == RsRating::D;
@@ -287,17 +333,21 @@ impl ScannerEngine {
                         reason = "RS Laggard (D), Trend Bearish";
                         rank_score += funding_skew; // Funding âm sâu thì trừ điểm rank (vì final_rs đang âm)
                     }
-                },
+                }
                 ActionMode::ScalpShort => {
                     let weak_rs = final_rs < -1.5;
                     let pump_protection = alt.change_1d_pct > 5.0 || diffs_1d[i] > 5.0;
                     let crowded_short = alt.funding_rate < -0.0015;
-                    if weak_rs && alt.ema50_15m < alt.ema200_15m && !pump_protection && !crowded_short {
+                    if weak_rs
+                        && alt.ema50_15m < alt.ema200_15m
+                        && !pump_protection
+                        && !crowded_short
+                    {
                         is_valid = true;
                         direction = "SHORT";
                         reason = "Weak short-term RS for Scalping (15m)";
                     }
-                },
+                }
                 ActionMode::MeanReversion => {
                     if final_rs < -2.5 && alt.distance_to_ema50_4h_pct < -5.0 {
                         is_valid = true;
@@ -308,7 +358,7 @@ impl ScannerEngine {
                         direction = "SHORT";
                         reason = "Overbought Extreme (Mean Reversion)";
                     }
-                },
+                }
                 ActionMode::OffSystem => {}
             }
 
@@ -330,7 +380,11 @@ impl ScannerEngine {
             }
         }
 
-        candidates.sort_by(|a, b| b.rank_score.partial_cmp(&a.rank_score).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| {
+            b.rank_score
+                .partial_cmp(&a.rank_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         candidates.truncate(5);
 
         candidates

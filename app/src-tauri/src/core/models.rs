@@ -33,8 +33,13 @@ pub struct Indicators {
 impl Default for Indicators {
     fn default() -> Self {
         Self {
-            ema20: None, ema50: None, ema200: None,
-            atr14: None, adx14: None, plus_di: None, minus_di: None,
+            ema20: None,
+            ema50: None,
+            ema200: None,
+            atr14: None,
+            adx14: None,
+            plus_di: None,
+            minus_di: None,
             structure: "None".to_string(),
             close_above_ema200_count: 0,
             ema50_slope: 0.0,
@@ -134,6 +139,7 @@ pub struct AltcoinSnapshot {
     pub funding_rate: f64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SymbolConfig {
     pub symbol: String,

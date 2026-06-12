@@ -1,15 +1,15 @@
 use anyhow::Result;
-use futures_util::{StreamExt, SinkExt};
+use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
-use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use std::time::Duration;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-use super::models::{Candle, NormalizedCandleData};
 use super::events::MarketEvent;
+use super::models::NormalizedCandleData;
 
 // Base endpoint cho phép gửi payload SUBSCRIBE (Sử dụng Combined Stream thuộc /market)
 const BINANCE_WS_BASE_URL: &str = "wss://fstream.binance.com/market/stream?streams=";
@@ -22,23 +22,24 @@ pub struct BinanceWsClient {
 
 impl BinanceWsClient {
     pub fn new(
-        event_tx: mpsc::Sender<MarketEvent>, 
-        _system_tx: mpsc::Sender<crate::core::events::SystemEvent>
+        event_tx: mpsc::Sender<MarketEvent>,
+        _system_tx: mpsc::Sender<crate::core::events::SystemEvent>,
     ) -> Self {
         let config = crate::core::config::AppConfig::load();
         let timeframes = config.timeframes;
 
-        Self { 
+        Self {
             symbols: Arc::new(RwLock::new(HashSet::new())),
             timeframes,
-            event_tx 
+            event_tx,
         }
     }
 
     /// Cập nhật danh sách symbols mà không cần Mutex bên ngoài
     pub async fn update_symbols(&self, symbols: Vec<String>) {
         let mut syms = self.symbols.write().await;
-        *syms = symbols.into_iter()
+        *syms = symbols
+            .into_iter()
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
@@ -53,7 +54,7 @@ impl BinanceWsClient {
                 streams.push(format!("{}@kline_{}", sym_lower, tf));
             }
         }
-        
+
         streams.push("btcdomusdt@markPrice".to_string());
         streams.push("!forceOrder@arr".to_string());
         streams.push("!markPrice@arr".to_string());
@@ -63,9 +64,9 @@ impl BinanceWsClient {
 
     pub async fn run(&self) -> Result<()> {
         // Mở kết nối với 1 stream mồi để Binance xác nhận đây là kết nối hợp lệ thuộc nhánh /market
-        let initial_stream = "btcusdt@markPrice"; 
+        let initial_stream = "btcusdt@markPrice";
         let url = format!("{}{}", BINANCE_WS_BASE_URL, initial_stream);
-        
+
         tracing::info!("[WS] ATTEMPTING CONNECTION TO BASE URL: {}", url);
 
         loop {
@@ -76,7 +77,10 @@ impl BinanceWsClient {
 
                     // Gửi payload SUBSCRIBE với danh sách stream đã chia nhỏ để tránh Limit của Binance
                     let all_streams = self.get_all_streams().await;
-                    tracing::info!("[WS] Registering {} streams dynamically...", all_streams.len());
+                    tracing::info!(
+                        "[WS] Registering {} streams dynamically...",
+                        all_streams.len()
+                    );
 
                     let mut req_id = 1;
                     for chunk in all_streams.chunks(200) {
@@ -85,20 +89,27 @@ impl BinanceWsClient {
                             "params": chunk,
                             "id": req_id
                         });
-                        
-                        if let Err(e) = write.send(Message::Text(subscribe_msg.to_string().into())).await {
+
+                        if let Err(e) = write
+                            .send(Message::Text(subscribe_msg.to_string().into()))
+                            .await
+                        {
                             tracing::error!("[WS] Failed to send SUBSCRIBE payload: {}", e);
                         }
                         req_id += 1;
-                        tokio::time::sleep(Duration::from_millis(500)).await; 
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
 
                     // 1. Giới hạn 24 giờ của Binance
                     let connection_time = chrono::Utc::now();
-                    
+
                     loop {
                         // Restart kết nối trước khi chạm ngưỡng 24h (ở đây an toàn lấy 23.5h)
-                        if chrono::Utc::now().signed_duration_since(connection_time).num_hours() >= 23 {
+                        if chrono::Utc::now()
+                            .signed_duration_since(connection_time)
+                            .num_hours()
+                            >= 23
+                        {
                             tracing::info!("[WS] 23 hours elapsed. Proactively reconnecting to avoid Binance 24h force-drop...");
                             break;
                         }
@@ -108,7 +119,9 @@ impl BinanceWsClient {
                                 self.handle_message(text.as_str()).await;
                             }
                             Ok(Some(Ok(Message::Ping(ping_data)))) => {
-                                tracing::debug!("[WS] Received Ping from Binance, sending explicit Pong.");
+                                tracing::debug!(
+                                    "[WS] Received Ping from Binance, sending explicit Pong."
+                                );
                                 if let Err(e) = write.send(Message::Pong(ping_data)).await {
                                     tracing::error!("[WS] Failed to send Pong: {}", e);
                                 }
@@ -156,14 +169,15 @@ impl BinanceWsClient {
                     let is_closed = k["x"].as_bool().unwrap_or(false);
 
                     if is_closed {
-                         tracing::info!("[WS KLINE CLOSED] {} | {} | Price: {} | Vol: {}", 
-                            normalized.candle.symbol, 
-                            normalized.candle.timeframe, 
+                        tracing::info!(
+                            "[WS KLINE CLOSED] {} | {} | Price: {} | Vol: {}",
+                            normalized.candle.symbol,
+                            normalized.candle.timeframe,
                             normalized.candle.close,
                             normalized.candle.volume
                         );
                     }
-                    
+
                     let event = if is_closed {
                         MarketEvent::CandleClosed(normalized)
                     } else {
@@ -171,45 +185,82 @@ impl BinanceWsClient {
                     };
                     let _ = self.event_tx.send(event).await;
                 }
-            }
-            else if data["e"] == "openInterestUpdate" {
+            } else if data["e"] == "openInterestUpdate" {
                 let symbol = data["s"].as_str().unwrap_or("").to_string();
-                let oi = data["o"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-                let _ = self.event_tx.send(MarketEvent::DepthUpdated {
-                    symbol, is_liquidation: false, price: 0.0, value_usd: oi, 
-                    timestamp: data["E"].as_i64().unwrap_or(0),
-                }).await;
-            }
-            else if data.is_array() {
+                let oi = data["o"]
+                    .as_str()
+                    .unwrap_or("0")
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
+                let _ = self
+                    .event_tx
+                    .send(MarketEvent::DepthUpdated {
+                        symbol,
+                        is_liquidation: false,
+                        price: 0.0,
+                        value_usd: oi,
+                        timestamp: data["E"].as_i64().unwrap_or(0),
+                    })
+                    .await;
+            } else if data.is_array() {
                 if let Some(arr) = data.as_array() {
                     for item in arr {
                         let event_type = item["e"].as_str().unwrap_or("");
                         match event_type {
                             "forceOrder" => {
-                                let amount = item["o"]["q"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-                                let price = item["o"]["p"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-                                let _ = self.event_tx.send(MarketEvent::DepthUpdated {
-                                    symbol: item["o"]["s"].as_str().unwrap_or("").to_string(),
-                                    is_liquidation: true, price, value_usd: amount * price,
-                                    timestamp: item["E"].as_i64().unwrap_or(0),
-                                }).await;
-                            },
+                                let amount = item["o"]["q"]
+                                    .as_str()
+                                    .unwrap_or("0")
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0);
+                                let price = item["o"]["p"]
+                                    .as_str()
+                                    .unwrap_or("0")
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0);
+                                let _ = self
+                                    .event_tx
+                                    .send(MarketEvent::DepthUpdated {
+                                        symbol: item["o"]["s"].as_str().unwrap_or("").to_string(),
+                                        is_liquidation: true,
+                                        price,
+                                        value_usd: amount * price,
+                                        timestamp: item["E"].as_i64().unwrap_or(0),
+                                    })
+                                    .await;
+                            }
                             "markPriceUpdate" => {
                                 let symbol = item["s"].as_str().unwrap_or("").to_string();
-                                let funding_rate = item["r"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-                                let mark_price = item["p"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+                                let funding_rate = item["r"]
+                                    .as_str()
+                                    .unwrap_or("0")
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0);
+                                let mark_price = item["p"]
+                                    .as_str()
+                                    .unwrap_or("0")
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0);
                                 if symbol == "BTCDOMUSDT" {
-                                    let _ = self.event_tx.send(MarketEvent::FundingUpdated {
-                                        symbol, funding_rate: mark_price, 
-                                        timestamp: item["E"].as_i64().unwrap_or(0),
-                                    }).await;
+                                    let _ = self
+                                        .event_tx
+                                        .send(MarketEvent::FundingUpdated {
+                                            symbol,
+                                            funding_rate: mark_price,
+                                            timestamp: item["E"].as_i64().unwrap_or(0),
+                                        })
+                                        .await;
                                 } else {
-                                    let _ = self.event_tx.send(MarketEvent::FundingUpdated {
-                                        symbol, funding_rate, 
-                                        timestamp: item["E"].as_i64().unwrap_or(0),
-                                    }).await;
+                                    let _ = self
+                                        .event_tx
+                                        .send(MarketEvent::FundingUpdated {
+                                            symbol,
+                                            funding_rate,
+                                            timestamp: item["E"].as_i64().unwrap_or(0),
+                                        })
+                                        .await;
                                 }
-                            },
+                            }
                             _ => {}
                         }
                     }
@@ -222,8 +273,10 @@ impl BinanceWsClient {
         let symbol = v["s"].as_str()?.to_string();
         let k = &v["k"];
         let candle = super::models::Candle {
-            symbol, timeframe: k["i"].as_str()?.to_string(),
-            open_time: k["t"].as_i64()?, close_time: k["T"].as_i64()?,
+            symbol,
+            timeframe: k["i"].as_str()?.to_string(),
+            open_time: k["t"].as_i64()?,
+            close_time: k["T"].as_i64()?,
             open: k["o"].as_str()?.parse().unwrap_or(0.0),
             high: k["h"].as_str()?.parse().unwrap_or(0.0),
             low: k["l"].as_str()?.parse().unwrap_or(0.0),
@@ -236,7 +289,8 @@ impl BinanceWsClient {
 
         Some(NormalizedCandleData {
             timestamp: chrono::Utc::now().timestamp(),
-            candle, ..Default::default()
+            candle,
+            ..Default::default()
         })
     }
 }

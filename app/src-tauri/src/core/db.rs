@@ -1,8 +1,7 @@
-use anyhow::{Result, Context};
+use crate::core::models::NormalizedCandleData;
+use anyhow::{Context, Result};
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{SqlitePool, Row};
-use std::sync::Arc;
-use crate::core::models::{Candle, NormalizedCandleData};
+use sqlx::{Row, SqlitePool};
 
 pub struct Database {
     pool: SqlitePool,
@@ -69,8 +68,12 @@ impl Database {
         .await?;
 
         // Thêm cột nếu chưa tồn tại (cho các DB cũ)
-        let _ = sqlx::query("ALTER TABLE closed_candles ADD COLUMN open_time_str TEXT;").execute(&self.pool).await;
-        let _ = sqlx::query("ALTER TABLE closed_candles ADD COLUMN close_time_str TEXT;").execute(&self.pool).await;
+        let _ = sqlx::query("ALTER TABLE closed_candles ADD COLUMN open_time_str TEXT;")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE closed_candles ADD COLUMN close_time_str TEXT;")
+            .execute(&self.pool)
+            .await;
 
         // Bảng lưu danh sách 100 Altcoins tiềm năng nhất (Universe) đã qua bộ lọc Composite Score
         sqlx::query(
@@ -92,7 +95,7 @@ impl Database {
                 price_change_percent REAL NOT NULL,
                 last_price REAL NOT NULL,
                 updated_at INTEGER NOT NULL
-            );"
+            );",
         )
         .execute(&self.pool)
         .await?;
@@ -101,11 +104,16 @@ impl Database {
     }
 
     /// Lưu trữ danh sách Universe Candidates vào DB
-    pub async fn save_universe_candidates(&self, candidates: &[crate::core::metadata::UniverseCandidate]) -> Result<()> {
+    pub async fn save_universe_candidates(
+        &self,
+        candidates: &[crate::core::metadata::UniverseCandidate],
+    ) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
-        
+
         // Xóa dữ liệu cũ trước khi nạp mới
-        sqlx::query("DELETE FROM universe_candidates").execute(&self.pool).await?;
+        sqlx::query("DELETE FROM universe_candidates")
+            .execute(&self.pool)
+            .await?;
 
         for c in candidates {
             sqlx::query(
@@ -142,20 +150,23 @@ impl Database {
     }
 
     /// Lấy danh sách Universe Candidates mới nhất từ DB
-    pub async fn get_stored_universe_candidates(&self) -> Result<Vec<crate::core::metadata::UniverseCandidate>> {
+    pub async fn get_stored_universe_candidates(
+        &self,
+    ) -> Result<Vec<crate::core::metadata::UniverseCandidate>> {
         let rows = sqlx::query(
             "SELECT symbol, quote_volume, volume_change_24h_pct, open_interest, oi_change_24h_pct,
                     volatility, funding_rate, vol_score, vol_change_score, oi_score,
                     oi_change_score, atr_score, fund_score, composite_score,
                     price_change_percent, last_price 
              FROM universe_candidates 
-             ORDER BY composite_score DESC"
+             ORDER BY composite_score DESC",
         )
         .fetch_all(&self.pool)
         .await?;
 
-        let candidates = rows.into_iter().map(|r| {
-            crate::core::metadata::UniverseCandidate {
+        let candidates = rows
+            .into_iter()
+            .map(|r| crate::core::metadata::UniverseCandidate {
                 symbol: r.get(0),
                 quote_volume: r.get(1),
                 volume_change_24h_pct: r.get(2),
@@ -172,8 +183,8 @@ impl Database {
                 composite_score: r.get(13),
                 price_change_percent: r.get(14),
                 last_price: r.get(15),
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(candidates)
     }
@@ -181,10 +192,18 @@ impl Database {
     /// Lưu nến đã đóng
     pub async fn insert_closed_candle(&self, data: &NormalizedCandleData) -> Result<()> {
         let open_time_str = chrono::DateTime::from_timestamp_millis(data.candle.open_time)
-            .map(|dt| dt.with_timezone(&chrono::Local).format("%d:%m:%Y %H:%M:%S").to_string())
+            .map(|dt| {
+                dt.with_timezone(&chrono::Local)
+                    .format("%d:%m:%Y %H:%M:%S")
+                    .to_string()
+            })
             .unwrap_or_default();
         let close_time_str = chrono::DateTime::from_timestamp_millis(data.candle.close_time)
-            .map(|dt| dt.with_timezone(&chrono::Local).format("%d:%m:%Y %H:%M:%S").to_string())
+            .map(|dt| {
+                dt.with_timezone(&chrono::Local)
+                    .format("%d:%m:%Y %H:%M:%S")
+                    .to_string()
+            })
             .unwrap_or_default();
 
         sqlx::query(
@@ -225,14 +244,83 @@ impl Database {
         Ok(())
     }
 
+    /// Lưu nhiều nến trong một transaction để warmup/backfill nhanh hơn.
+    pub async fn insert_closed_candles_bulk(&self, candles: &[NormalizedCandleData]) -> Result<()> {
+        if candles.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        for data in candles {
+            let open_time_str = chrono::DateTime::from_timestamp_millis(data.candle.open_time)
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local)
+                        .format("%d:%m:%Y %H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            let close_time_str = chrono::DateTime::from_timestamp_millis(data.candle.close_time)
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local)
+                        .format("%d:%m:%Y %H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_default();
+
+            sqlx::query(
+                "INSERT OR REPLACE INTO closed_candles (
+                    symbol, timeframe, open_time, close_time, open_time_str, close_time_str,
+                    open, high, low, close, volume,
+                    ema20, ema50, ema200, atr14, adx14, plus_di, minus_di, structure,
+                    oi_change_pct, range_24h_pct, range_p40_90d, atr_surge_ratio, is_warmup
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
+            )
+            .bind(&data.candle.symbol)
+            .bind(&data.candle.timeframe)
+            .bind(data.candle.open_time)
+            .bind(data.candle.close_time)
+            .bind(open_time_str)
+            .bind(close_time_str)
+            .bind(data.candle.open)
+            .bind(data.candle.high)
+            .bind(data.candle.low)
+            .bind(data.candle.close)
+            .bind(data.candle.volume)
+            .bind(data.indicators.ema20)
+            .bind(data.indicators.ema50)
+            .bind(data.indicators.ema200)
+            .bind(data.indicators.atr14)
+            .bind(data.indicators.adx14)
+            .bind(data.indicators.plus_di)
+            .bind(data.indicators.minus_di)
+            .bind(&data.indicators.structure)
+            .bind(data.microstructure.oi_change_4h_pct)
+            .bind(data.range_24h_pct)
+            .bind(data.range_p40_90d)
+            .bind(data.atr_surge_ratio)
+            .bind(data.metadata.is_warmup)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Lấy danh sách nến từ DB để tính toán chỉ báo mà không cần gọi API
-    pub async fn get_candles_with_indicators(&self, symbol: &str, timeframe: &str, limit: usize) -> Result<Vec<crate::core::models::NormalizedCandleData>> {
+    pub async fn get_candles_with_indicators(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::core::models::NormalizedCandleData>> {
         let rows = sqlx::query(
             "SELECT symbol, timeframe, open_time, close_time, open, high, low, close, volume,
                     ema20, ema50, ema200, atr14, adx14, plus_di, minus_di, structure
              FROM closed_candles 
              WHERE symbol = ?1 AND timeframe = ?2 
-             ORDER BY open_time DESC LIMIT ?3"
+             ORDER BY open_time DESC LIMIT ?3",
         )
         .bind(symbol)
         .bind(timeframe)
@@ -240,8 +328,9 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut data: Vec<crate::core::models::NormalizedCandleData> = rows.iter().map(|r| {
-            crate::core::models::NormalizedCandleData {
+        let mut data: Vec<crate::core::models::NormalizedCandleData> = rows
+            .iter()
+            .map(|r| crate::core::models::NormalizedCandleData {
                 timestamp: r.get(2),
                 candle: crate::core::models::Candle {
                     symbol: r.get(0),
@@ -269,22 +358,27 @@ impl Database {
                     ..Default::default()
                 },
                 ..Default::default()
-            }
-        }).collect();
-        
-        data.reverse(); 
+            })
+            .collect();
+
+        data.reverse();
         Ok(data)
     }
 
     /// Tìm kiếm nến kèm chỉ báo với cơ chế fuzzy match
-    pub async fn search_candles_with_indicators(&self, search_term: &str, timeframe: &str, limit: usize) -> Result<Vec<crate::core::models::NormalizedCandleData>> {
+    pub async fn search_candles_with_indicators(
+        &self,
+        search_term: &str,
+        timeframe: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::core::models::NormalizedCandleData>> {
         let pattern = format!("%{}%", search_term.to_uppercase());
         let rows = sqlx::query(
             r#"SELECT symbol, timeframe, open_time, close_time, open, high, low, close, volume,
                     ema20, ema50, ema200, atr14, adx14, plus_di, minus_di, structure
              FROM closed_candles 
              WHERE symbol LIKE ?1 AND (?2 = "" OR timeframe = ?2) 
-             ORDER BY open_time DESC LIMIT ?3"#
+             ORDER BY open_time DESC LIMIT ?3"#,
         )
         .bind(pattern)
         .bind(timeframe)
@@ -292,8 +386,9 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut data: Vec<crate::core::models::NormalizedCandleData> = rows.iter().map(|r| {
-            crate::core::models::NormalizedCandleData {
+        let mut data: Vec<crate::core::models::NormalizedCandleData> = rows
+            .iter()
+            .map(|r| crate::core::models::NormalizedCandleData {
                 timestamp: r.get(2),
                 candle: crate::core::models::Candle {
                     symbol: r.get(0),
@@ -321,10 +416,10 @@ impl Database {
                     ..Default::default()
                 },
                 ..Default::default()
-            }
-        }).collect();
-        
-        data.reverse(); 
+            })
+            .collect();
+
+        data.reverse();
         Ok(data)
     }
 
@@ -342,12 +437,17 @@ impl Database {
     }
 
     /// Lấy danh sách nến thô
-    pub async fn get_candles(&self, symbol: &str, timeframe: &str, limit: usize) -> Result<Vec<crate::core::models::Candle>> {
+    pub async fn get_candles(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::core::models::Candle>> {
         let rows = sqlx::query(
             "SELECT symbol, timeframe, open_time, close_time, open, high, low, close, volume 
              FROM closed_candles 
              WHERE symbol = ?1 AND timeframe = ?2 
-             ORDER BY open_time DESC LIMIT ?3"
+             ORDER BY open_time DESC LIMIT ?3",
         )
         .bind(symbol)
         .bind(timeframe)
@@ -355,8 +455,9 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut candles: Vec<crate::core::models::Candle> = rows.iter().map(|r| {
-            crate::core::models::Candle {
+        let mut candles: Vec<crate::core::models::Candle> = rows
+            .iter()
+            .map(|r| crate::core::models::Candle {
                 symbol: r.get(0),
                 timeframe: r.get(1),
                 open_time: r.get(2),
@@ -369,18 +470,23 @@ impl Database {
                 quote_volume: 0.0,
                 taker_buy_volume: 0.0,
                 is_closed: true,
-            }
-        }).collect();
-        
+            })
+            .collect();
+
         candles.reverse();
         Ok(candles)
     }
 
     /// Kiểm tra xem dữ liệu trong máy còn mới không
     pub async fn get_last_update_time(&self, symbol: &str, timeframe: &str) -> Result<i64> {
-        let row = sqlx::query("SELECT MAX(close_time) FROM closed_candles WHERE symbol = ?1 AND timeframe = ?2")
-            .bind(symbol).bind(timeframe).fetch_optional(&self.pool).await?;
-        
+        let row = sqlx::query(
+            "SELECT MAX(close_time) FROM closed_candles WHERE symbol = ?1 AND timeframe = ?2",
+        )
+        .bind(symbol)
+        .bind(timeframe)
+        .fetch_optional(&self.pool)
+        .await?;
+
         Ok(row.and_then(|r| r.get::<Option<i64>, _>(0)).unwrap_or(0))
     }
 
@@ -389,7 +495,9 @@ impl Database {
         let tf = config.altcoin_analysis_timeframe;
         let rows = sqlx::query("SELECT range_24h_pct FROM closed_candles WHERE symbol = ?1 AND timeframe = ?2 ORDER BY open_time DESC LIMIT 90")
             .bind(symbol).bind(&tf).fetch_all(&self.pool).await?;
-        if rows.is_empty() { return Ok(0.0); }
+        if rows.is_empty() {
+            return Ok(0.0);
+        }
         let mut ranges: Vec<f64> = rows.iter().map(|r| r.get::<f64, _>(0)).collect();
         ranges.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let idx = (ranges.len() as f64 * 0.4) as usize;

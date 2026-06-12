@@ -1,9 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::models::NormalizedCandleData;
     use crate::core::websocket::BinanceWsClient;
-    use crate::core::events::{MarketEvent, SystemEvent};
-    use tokio::sync::{mpsc, broadcast};
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_pipeline_output_schema() {
@@ -21,6 +19,8 @@ mod tests {
                 "l": "67500.0",
                 "c": "68200.0",
                 "v": "100.5",
+                "q": "6854100.0",
+                "V": "55.5",
                 "x": true
             }
         }"#;
@@ -30,8 +30,7 @@ mod tests {
         let (sys_tx, _) = mpsc::channel(1);
         let client = BinanceWsClient::new(tx, sys_tx);
         let v: serde_json::Value = serde_json::from_str(raw_json).unwrap();
-        let normalized = client.parse_kline(v).unwrap();
-
+        let normalized = client.parse_kline(v).await.unwrap();
 
         // 3. Assert dữ liệu
         assert_eq!(normalized.candle.symbol, "BTCUSDT");
