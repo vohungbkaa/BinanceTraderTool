@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { Brain, Zap, Activity, Info } from '@lucide/vue';
+import { Brain, Zap, Activity, Info, Loader2 } from '@lucide/vue';
 import type { MarketRegimeContext } from '../../types/market';
 import { VolatilityRegime } from '../../types/market';
 
 defineProps<{
   regime: MarketRegimeContext;
+  isLoading?: boolean;
+  missingTimeframes?: string[];
 }>();
 
 defineEmits(['show-glossary']);
@@ -44,7 +46,11 @@ const getVolatilityColor = (regime: VolatilityRegime) => {
         </button>
       </div>
       
-      <div class="flex items-center gap-3">
+      <div v-if="isLoading" class="flex items-center gap-2 text-[10px] font-bold uppercase text-yellow-500">
+        <Loader2 class="w-3 h-3 animate-spin" />
+        Waiting for BTC context
+      </div>
+      <div v-else class="flex items-center gap-3">
         <span class="text-[10px] font-bold uppercase text-gray-500">Scanner Gateway:</span>
         <div :class="regime.allow_alt_scan ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]' : 'bg-red-500'" 
              class="w-3 h-3 rounded-full transition-all duration-500"></div>
@@ -54,52 +60,76 @@ const getVolatilityColor = (regime: VolatilityRegime) => {
       </div>
     </div>
 
+    <div v-if="isLoading" class="mb-5 rounded-lg border border-yellow-500/20 bg-yellow-500/10 px-4 py-3 text-xs font-semibold text-yellow-500">
+      Market Regime Engine is waiting for BTC context{{ missingTimeframes?.length ? `: ${missingTimeframes.join(', ')}` : '' }}. Scores below are placeholders until all required inputs arrive.
+    </div>
+
     <div class="grid grid-cols-12 gap-6 relative z-10">
       <!-- Market Score -->
       <div class="col-span-12 md:col-span-5 grid grid-cols-2 gap-4">
-        <div class="flex flex-col items-center justify-center p-4 bg-black/20 rounded-xl border border-gray-800/50">
+        <div class="relative flex flex-col items-center justify-center p-4 bg-black/20 rounded-xl border border-gray-800/50 overflow-hidden">
           <span class="text-[10px] font-bold text-gray-500 uppercase mb-2">Trend Score</span>
-          <div :class="getTrendColor(regime.trend_score)" class="text-4xl font-black font-mono">
+          <div :class="[getTrendColor(regime.trend_score), { 'blur-sm opacity-40': isLoading }]" class="text-4xl font-black font-mono">
             {{ regime.trend_score }}
           </div>
           <div class="w-full h-1 bg-gray-800 rounded-full mt-4 overflow-hidden">
             <div class="h-full transition-all duration-1000 bg-blue-500" 
                  :style="{ width: `${regime.trend_score}%` }"></div>
           </div>
+          <div v-if="isLoading" class="absolute inset-0 flex flex-col items-center justify-center bg-[#1e2329]/80 backdrop-blur-[1px]">
+            <Loader2 class="w-5 h-5 text-yellow-500 animate-spin mb-2" />
+            <span class="text-[10px] font-black uppercase text-yellow-500">Syncing trend</span>
+          </div>
         </div>
-        <div class="flex flex-col items-center justify-center p-4 bg-black/20 rounded-xl border border-gray-800/50">
+        <div class="relative flex flex-col items-center justify-center p-4 bg-black/20 rounded-xl border border-gray-800/50 overflow-hidden">
           <span class="text-[10px] font-bold text-gray-500 uppercase mb-2">Flow Score</span>
-          <div :class="getFlowColor(regime.flow_score)" class="text-4xl font-black font-mono">
+          <div :class="[getFlowColor(regime.flow_score), { 'blur-sm opacity-40': isLoading }]" class="text-4xl font-black font-mono">
             {{ regime.flow_score }}
           </div>
           <div class="w-full h-1 bg-gray-800 rounded-full mt-4 overflow-hidden">
             <div class="h-full transition-all duration-1000 bg-green-500" 
                  :style="{ width: `${regime.flow_score}%` }"></div>
           </div>
+          <div v-if="isLoading" class="absolute inset-0 flex flex-col items-center justify-center bg-[#1e2329]/80 backdrop-blur-[1px]">
+            <Loader2 class="w-5 h-5 text-yellow-500 animate-spin mb-2" />
+            <span class="text-[10px] font-black uppercase text-yellow-500">Syncing flow</span>
+          </div>
         </div>
       </div>
 
       <!-- Analysis Details -->
       <div class="col-span-12 md:col-span-7 grid grid-cols-2 gap-4">
-        <div class="p-3 bg-black/20 rounded-lg border border-gray-800/30">
+        <div class="relative p-3 bg-black/20 rounded-lg border border-gray-800/30 overflow-hidden">
           <p class="text-[9px] font-bold text-gray-500 uppercase mb-1">Macro Trend (1D)</p>
-          <p class="text-sm font-bold text-gray-200">{{ regime.structural_trend }}</p>
+          <p class="text-sm font-bold text-gray-200" :class="{ 'blur-sm opacity-40': isLoading }">{{ regime.structural_trend }}</p>
+          <div v-if="isLoading && missingTimeframes?.includes('1d')" class="absolute inset-0 flex items-center justify-center bg-[#1e2329]/75">
+            <span class="text-[10px] font-black uppercase text-yellow-500">Waiting 1D</span>
+          </div>
         </div>
-        <div class="p-3 bg-black/20 rounded-lg border border-gray-800/30">
+        <div class="relative p-3 bg-black/20 rounded-lg border border-gray-800/30 overflow-hidden">
           <p class="text-[9px] font-bold text-gray-500 uppercase mb-1">Micro State (4H)</p>
-          <p class="text-sm font-bold text-gray-200">{{ regime.operational_state }}</p>
+          <p class="text-sm font-bold text-gray-200" :class="{ 'blur-sm opacity-40': isLoading }">{{ regime.operational_state }}</p>
+          <div v-if="isLoading && missingTimeframes?.includes('4h')" class="absolute inset-0 flex items-center justify-center bg-[#1e2329]/75">
+            <span class="text-[10px] font-black uppercase text-yellow-500">Waiting 4H</span>
+          </div>
         </div>
-        <div class="p-3 bg-black/20 rounded-lg border border-gray-800/30">
+        <div class="relative p-3 bg-black/20 rounded-lg border border-gray-800/30 overflow-hidden">
           <p class="text-[9px] font-bold text-gray-500 uppercase mb-1 flex items-center gap-1">
             <Activity class="w-2.5 h-2.5" /> Volatility
           </p>
-          <p class="text-sm font-bold" :class="getVolatilityColor(regime.volatility_regime)">{{ regime.volatility_regime }}</p>
+          <p class="text-sm font-bold" :class="[getVolatilityColor(regime.volatility_regime), { 'blur-sm opacity-40': isLoading }]">{{ regime.volatility_regime }}</p>
+          <div v-if="isLoading" class="absolute inset-0 flex items-center justify-center bg-[#1e2329]/75">
+            <span class="text-[10px] font-black uppercase text-yellow-500">Syncing ATR</span>
+          </div>
         </div>
-        <div class="p-3 bg-black/20 rounded-lg border border-gray-800/30">
+        <div class="relative p-3 bg-black/20 rounded-lg border border-gray-800/30 overflow-hidden">
           <p class="text-[9px] font-bold text-gray-500 uppercase mb-1 flex items-center gap-1">
             <Zap class="w-2.5 h-2.5" /> OI State
           </p>
-          <p class="text-sm font-bold text-orange-400 uppercase italic">{{ regime.oi_state }}</p>
+          <p class="text-sm font-bold text-orange-400 uppercase italic" :class="{ 'blur-sm opacity-40': isLoading }">{{ regime.oi_state }}</p>
+          <div v-if="isLoading" class="absolute inset-0 flex items-center justify-center bg-[#1e2329]/75">
+            <span class="text-[10px] font-black uppercase text-yellow-500">Syncing OI</span>
+          </div>
         </div>
       </div>
     </div>
@@ -116,7 +146,7 @@ const getVolatilityColor = (regime: VolatilityRegime) => {
         <Zap class="w-5 h-5 fill-current" />
         <div>
           <p class="text-[9px] font-black uppercase tracking-tighter opacity-70">Current Action Mode</p>
-          <h3 class="text-lg font-black italic uppercase leading-none">{{ regime.action_mode }}</h3>
+          <h3 class="text-lg font-black italic uppercase leading-none">{{ isLoading ? 'Syncing_Context' : regime.action_mode }}</h3>
         </div>
       </div>
       <div v-if="regime.allow_alt_scan" class="flex items-center gap-1 px-3 py-1 bg-green-500 text-black rounded text-[10px] font-black animate-bounce">

@@ -34,6 +34,18 @@ impl BreadthEngine {
     /// [SPEC 2.3] Tính toán Market Breadth với cơ chế Cache để bảo vệ IP
     /// Hàm này không yêu cầu Mutex Lock vì chỉ đọc dữ liệu và trả về kết quả tính toán.
     pub async fn calculate_breadth(&self, top_altcoins: &[String]) -> Result<(f64, f64)> {
+        self.calculate_breadth_internal(top_altcoins, true).await
+    }
+
+    pub async fn calculate_breadth_silent(&self, top_altcoins: &[String]) -> Result<(f64, f64)> {
+        self.calculate_breadth_internal(top_altcoins, false).await
+    }
+
+    async fn calculate_breadth_internal(
+        &self,
+        top_altcoins: &[String],
+        emit_progress: bool,
+    ) -> Result<(f64, f64)> {
         info!("BreadthEngine: Calculating Market Breadth (High-Speed Mode)...");
 
         let mut count_above_ema50 = 0;
@@ -56,7 +68,7 @@ impl BreadthEngine {
             let db = self.db.clone();
             let rest_client = self.rest_client.clone();
             let tf_clone = tf.clone();
-            let app_handle = self.app_handle.clone();
+            let app_handle = emit_progress.then(|| self.app_handle.clone());
             let completed_symbols = completed_symbols.clone();
             let total = total;
             let permit = semaphore.clone().acquire_owned().await.unwrap();
@@ -122,15 +134,17 @@ impl BreadthEngine {
                 }
 
                 let done = completed_symbols.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                let progress = 60.0 + (done as f64 / total as f64) * 30.0;
-                let _ = app_handle.emit(
-                    "market-event",
-                    &MarketEvent::SyncProgress {
-                        step: "BREADTH".to_string(),
-                        progress,
-                        message: format!("Breadth Analysis: {}/{}", done, total),
-                    },
-                );
+                if let Some(handle) = app_handle {
+                    let progress = 60.0 + (done as f64 / total as f64) * 30.0;
+                    let _ = handle.emit(
+                        "market-event",
+                        &MarketEvent::SyncProgress {
+                            step: "BREADTH".to_string(),
+                            progress,
+                            message: format!("Breadth Analysis: {}/{}", done, total),
+                        },
+                    );
+                }
 
                 (last_close, final_indicators)
             }));

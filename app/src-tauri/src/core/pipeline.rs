@@ -86,13 +86,10 @@ impl DataPipeline {
             },
         );
 
-        // 1. [SPEC 2.2] Thiết lập Scanning Universe (Top 100 Altcoins) và xác lập baseline bối cảnh thị trường.
-        self.sync_metadata_and_breadth().await?;
+        // 1. Fast-start từ cache nội bộ để user không phải chờ full metadata scan.
+        self.bootstrap_symbols_from_cache().await;
 
-        // 2. Hâm nóng các Engine Momentum (Warm-up): Tải nến lịch sử để khởi tạo trạng thái cho EMA và ATR.
-        self.perform_warmup().await?;
-
-        // 3. Worker Risk & News: Theo dõi lịch kinh tế và các biến cố Macro (30p/lần).
+        // 2. Worker Risk & News: Theo dõi lịch kinh tế và các biến cố Macro (30p/lần).
         let risk_manager_clone = Arc::clone(&self.risk_manager);
         tokio::spawn(async move {
             loop {
@@ -106,7 +103,7 @@ impl DataPipeline {
             }
         });
 
-        // 4. Worker Market Universe: Cập nhật Top 100 và Market Breadth định kỳ (1h/lần).
+        // 3. Worker Market Universe: Cập nhật Top 100 và Market Breadth định kỳ (1h/lần).
         let breadth_engine_clone = Arc::clone(&self.breadth_engine);
         let metadata_manager_clone = Arc::clone(&self.metadata_manager);
         let db_clone_sync = Arc::clone(&self.db);
@@ -147,13 +144,27 @@ impl DataPipeline {
             }
         });
 
-        // 5. Duy trì kết nối WebSocket thời gian thực.
+        // 4. Duy trì kết nối WebSocket thời gian thực càng sớm càng tốt.
         let ws_client_clone = Arc::clone(&self.ws_client);
         tokio::spawn(async move {
             if let Err(e) = ws_client_clone.run().await {
                 error!("WebSocket client stopped with error: {}", e);
             }
         });
+
+        // 5. Prime nhanh BTC từ cache để Phase 1/UI có context trước khi background warmup hoàn tất.
+        self.prime_cached_btc_context().await;
+
+        let _ = self.app_handle.emit(
+            "market-event",
+            &MarketEvent::SyncProgress {
+                step: "WARMUP_DONE".to_string(),
+                progress: 100.0,
+                message: "Live feed ready. Background sync is continuing.".to_string(),
+            },
+        );
+
+        self.spawn_background_bootstrap();
 
         // 6. Vòng lặp điều phối chính: Phân phối sự kiện và kích hoạt Scanner.
         let mut regime_rx = self.global_event_tx.subscribe();
@@ -262,6 +273,157 @@ impl DataPipeline {
         Ok(())
     }
 
+    async fn bootstrap_symbols_from_cache(&mut self) {
+        let cached = self
+            .db
+            .get_stored_universe_candidates()
+            .await
+            .unwrap_or_default();
+        if !cached.is_empty() {
+            let _ = self.app_handle.emit(
+                "market-event",
+                &MarketEvent::UniverseUpdated(cached.clone()),
+            );
+        }
+
+        let mut symbols = vec!["BTCUSDT".to_string()];
+        symbols.extend(cached.into_iter().map(|c| c.symbol));
+        symbols.sort();
+        symbols.dedup();
+
+        self.symbols = symbols.clone();
+        self.ws_client.update_symbols(symbols).await;
+
+        let _ = self.app_handle.emit(
+            "market-event",
+            &MarketEvent::SyncProgress {
+                step: "WEBSOCKET".to_string(),
+                progress: 70.0,
+                message: "Starting live market feed from cached universe...".to_string(),
+            },
+        );
+    }
+
+    async fn prime_cached_btc_context(&self) {
+        let tfs = ["1d", "4h", "15m"];
+        for tf in tfs {
+            if let Ok(btc_data) = self.db.get_candles_with_indicators("BTCUSDT", tf, 1).await {
+                if let Some(mut data) = btc_data.into_iter().next() {
+                    let risk = self.risk_manager.lock().await;
+                    let (e50, e200) = {
+                        let r50 = self.breadth_engine.market_breadth_ema50.read().await;
+                        let r200 = self.breadth_engine.market_breadth_ema200.read().await;
+                        (*r50, *r200)
+                    };
+                    let atr = data.indicators.atr14.unwrap_or(data.candle.close * 0.02);
+                    data.microstructure =
+                        risk.get_microstructure_risk(&data.candle.symbol, data.candle.close, atr);
+                    data.macro_events = risk.get_macro_events().await;
+                    let mut indices = risk.get_market_indices();
+                    indices.market_breadth_pct_above_ema50 = e50;
+                    indices.market_breadth_pct_above_ema200 = e200;
+                    data.market_indices = indices;
+                    let _ = self.global_event_tx.send(MarketEvent::CandleClosed(data));
+                }
+            }
+        }
+    }
+
+    fn spawn_background_bootstrap(&self) {
+        let metadata_manager = Arc::clone(&self.metadata_manager);
+        let breadth_engine = Arc::clone(&self.breadth_engine);
+        let db = Arc::clone(&self.db);
+        let risk_manager = Arc::clone(&self.risk_manager);
+        let rest_client = self.rest_client.clone();
+        let ws_client = Arc::clone(&self.ws_client);
+        let indicator_engine = Arc::clone(&self.indicator_engine);
+        let app_handle = self.app_handle.clone();
+
+        tokio::spawn(async move {
+            info!("[PIPELINE] Background bootstrap started.");
+            match metadata_manager.get_top_altcoins(None).await {
+                Ok(candidates) => {
+                    let _ = app_handle.emit(
+                        "market-event",
+                        &MarketEvent::UniverseUpdated(candidates.clone()),
+                    );
+                    if let Err(e) = db.save_universe_candidates(&candidates).await {
+                        warn!("Failed to save universe candidates: {}", e);
+                    }
+
+                    let top_alts: Vec<String> = candidates.into_iter().map(|c| c.symbol).collect();
+                    let mut ws_symbols = vec!["BTCUSDT".to_string()];
+                    ws_symbols.extend(top_alts.clone());
+                    ws_symbols.sort();
+                    ws_symbols.dedup();
+                    ws_client.update_symbols(ws_symbols.clone()).await;
+
+                    let funding_task = {
+                        let rest = rest_client.clone();
+                        let risk_m = Arc::clone(&risk_manager);
+                        let universe_set: std::collections::HashSet<String> =
+                            top_alts.iter().cloned().collect();
+                        async move {
+                            match rest.fetch_premium_index().await {
+                                Ok(premiums) => {
+                                    let mut risk = risk_m.lock().await;
+                                    for p in premiums {
+                                        let sym = p["symbol"].as_str().unwrap_or("").to_string();
+                                        if universe_set.contains(&sym) || sym == "BTCUSDT" {
+                                            let fr = p["lastFundingRate"]
+                                                .as_str()
+                                                .unwrap_or("0")
+                                                .parse::<f64>()
+                                                .unwrap_or(0.0);
+                                            risk.symbol_funding.insert(sym, fr);
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!("[PIPELINE] Background funding sync failed: {}", e),
+                            }
+                        }
+                    };
+
+                    let breadth_task = {
+                        let breadth_e = Arc::clone(&breadth_engine);
+                        let alts = top_alts.clone();
+                        async move {
+                            if let Ok((e50, e200)) = breadth_e.calculate_breadth_silent(&alts).await
+                            {
+                                breadth_e.apply_results(e50, e200).await;
+                                e50
+                            } else {
+                                0.0
+                            }
+                        }
+                    };
+
+                    let (_, ema50_val) = tokio::join!(funding_task, breadth_task);
+                    {
+                        let mut risk = risk_manager.lock().await;
+                        use crate::core::models::TrendDirection;
+                        risk.total3_trend = if ema50_val > 55.0 {
+                            TrendDirection::Up
+                        } else if ema50_val < 45.0 {
+                            TrendDirection::Down
+                        } else {
+                            TrendDirection::Sideway
+                        };
+                    }
+
+                    if let Err(e) =
+                        Self::warmup_symbols(ws_symbols, db, rest_client, indicator_engine, None)
+                            .await
+                    {
+                        warn!("[PIPELINE] Background warmup failed: {}", e);
+                    }
+                }
+                Err(e) => warn!("[PIPELINE] Background universe refresh failed: {}", e),
+            }
+        });
+    }
+
+    #[allow(dead_code)]
     /// Lọc danh sách Top 100 và xác lập baseline bối cảnh thị trường.
     async fn sync_metadata_and_breadth(&mut self) -> Result<()> {
         info!("[PIPELINE] Synchronizing Universe Metadata & Breadth...");
@@ -364,25 +526,48 @@ impl DataPipeline {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Backfilling dữ liệu nến lịch sử để khởi tạo Indicators.
     async fn perform_warmup(&mut self) -> Result<()> {
         info!("Performing warm-up...");
+        Self::warmup_symbols(
+            self.symbols.clone(),
+            Arc::clone(&self.db),
+            self.rest_client.clone(),
+            Arc::clone(&self.indicator_engine),
+            Some(self.app_handle.clone()),
+        )
+        .await?;
+        self.prime_cached_btc_context().await;
+        Ok(())
+    }
+
+    async fn warmup_symbols(
+        symbols: Vec<String>,
+        db: Arc<Database>,
+        rest_client: BinanceRestClient,
+        indicator_engine: Arc<Mutex<IndicatorEngine>>,
+        progress_handle: Option<AppHandle>,
+    ) -> Result<()> {
         let timeframes = crate::core::config::AppConfig::load().timeframes;
         let semaphore = Arc::new(tokio::sync::Semaphore::new(20));
         let mut join_handles = Vec::new();
-        let total_steps = timeframes.len() * self.symbols.len();
+        let total_steps = timeframes.len() * symbols.len();
+        if total_steps == 0 {
+            return Ok(());
+        }
         let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         for tf in timeframes {
-            for symbol in &self.symbols {
+            for symbol in &symbols {
                 let (s, t, d, r, i, c, h) = (
                     symbol.clone(),
                     tf.clone(),
-                    self.db.clone(),
-                    self.rest_client.clone(),
-                    self.indicator_engine.clone(),
+                    db.clone(),
+                    rest_client.clone(),
+                    indicator_engine.clone(),
                     completed.clone(),
-                    self.app_handle.clone(),
+                    progress_handle.clone(),
                 );
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
                 join_handles.push(tokio::spawn(async move {
@@ -431,55 +616,23 @@ impl DataPipeline {
                         }
                     }
                     let done = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                    let prog = 70.0 + (done as f64 / total_steps as f64) * 30.0;
-                    let _ = h.emit(
-                        "market-event",
-                        &MarketEvent::SyncProgress {
-                            step: "WARMUP".to_string(),
-                            progress: prog,
-                            message: format!("Warmup {} {}: {}/{}", s, t, done, total_steps),
-                        },
-                    );
+                    if let Some(handle) = h {
+                        let prog = 70.0 + (done as f64 / total_steps as f64) * 30.0;
+                        let _ = handle.emit(
+                            "market-event",
+                            &MarketEvent::SyncProgress {
+                                step: "WARMUP".to_string(),
+                                progress: prog,
+                                message: format!("Warmup {} {}: {}/{}", s, t, done, total_steps),
+                            },
+                        );
+                    }
                 }));
             }
         }
         for handle in join_handles {
             let _ = handle.await;
         }
-
-        // Multi-timeframe Priming
-        let tfs = ["1d", "4h", "15m"];
-        for tf in tfs {
-            if let Ok(btc_data) = self.db.get_candles_with_indicators("BTCUSDT", tf, 1).await {
-                if let Some(mut data) = btc_data.into_iter().next() {
-                    let risk = self.risk_manager.lock().await;
-                    let (e50, e200) = {
-                        let r50 = self.breadth_engine.market_breadth_ema50.read().await;
-                        let r200 = self.breadth_engine.market_breadth_ema200.read().await;
-                        (*r50, *r200)
-                    };
-                    let atr = data.indicators.atr14.unwrap_or(data.candle.close * 0.02);
-                    data.microstructure =
-                        risk.get_microstructure_risk(&data.candle.symbol, data.candle.close, atr);
-                    data.macro_events = risk.get_macro_events().await;
-                    let mut indices = risk.get_market_indices();
-                    indices.market_breadth_pct_above_ema50 = e50;
-                    indices.market_breadth_pct_above_ema200 = e200;
-                    data.market_indices = indices;
-                    let _ = self.global_event_tx.send(MarketEvent::CandleClosed(data));
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
-            }
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        let _ = self.app_handle.emit(
-            "market-event",
-            &MarketEvent::SyncProgress {
-                step: "WARMUP_DONE".to_string(),
-                progress: 100.0,
-                message: "System ready.".to_string(),
-            },
-        );
         Ok(())
     }
 

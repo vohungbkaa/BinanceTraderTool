@@ -32,6 +32,8 @@ onMounted(() => {
         <!-- Market Regime Center (NEW Phase 1) -->
         <MarketRegime 
           :regime="market.regime" 
+          :is-loading="market.isRegimeLoading"
+          :missing-timeframes="market.missingRegimeTimeframes"
           @show-glossary="isGlossaryOpen = true"
         />
 
@@ -42,15 +44,20 @@ onMounted(() => {
             :key="tf" 
             :tf="tf" 
             :data="market.btcData[tf]" 
+            :is-loading="!market.btcData[tf]"
           />
         </div>
 
-        <MarketBreadth :indices="market.marketIndices" />
+        <MarketBreadth 
+          :indices="market.marketIndices" 
+          :is-loading="!market.hasBreadthData"
+        />
 
         <!-- Altcoin Scanner Results (Phase 2) -->
         <AltcoinScanner 
           :shortlist="market.shortlist" 
           :last-scan-time="market.lastScanTime"
+          :is-loading="market.isScannerLoading"
         />
       </div>
 
@@ -59,6 +66,7 @@ onMounted(() => {
         <RiskMonitor
           next-event="FOMC Meeting"
           :microstructure="market.btcData['15m']?.microstructure || market.btcData['4h']?.microstructure || null"
+          :is-loading="!market.hasRiskData"
         />
         
         <LogStream 

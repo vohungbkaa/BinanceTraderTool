@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ShieldCheck, Clock, Activity, Target } from '@lucide/vue';
+import { ShieldCheck, Clock, Activity, Target, Loader2 } from '@lucide/vue';
 import type { Microstructure } from '../../types/market';
 import { formatNum } from '../../composables/useFormat';
 
 defineProps<{
   nextEvent: string;
   microstructure: Microstructure | null;
+  isLoading?: boolean;
 }>();
 </script>
 
@@ -14,6 +15,10 @@ defineProps<{
     <div class="flex items-center gap-2 mb-4">
       <ShieldCheck class="w-5 h-5 text-green-400" />
       <h2 class="text-sm font-bold uppercase tracking-wider">Risk & Order Flow</h2>
+      <div v-if="isLoading" class="ml-auto flex items-center gap-2 text-[10px] font-bold uppercase text-yellow-500">
+        <Loader2 class="w-3 h-3 animate-spin" />
+        Waiting
+      </div>
     </div>
     
     <div class="space-y-4">
@@ -26,7 +31,11 @@ defineProps<{
       </div>
       
       <!-- Order Flow Metrics -->
-      <div v-if="microstructure" class="space-y-2">
+      <div v-if="isLoading" class="rounded-lg border border-yellow-500/20 bg-yellow-500/10 px-4 py-3 text-xs font-semibold text-yellow-500">
+        Waiting for BTC order-flow context before showing liquidation and CVD metrics.
+      </div>
+
+      <div v-else-if="microstructure" class="space-y-2">
         <div class="grid grid-cols-2 gap-2">
           <div class="p-3 bg-black/20 rounded-lg border border-gray-800">
             <div class="flex items-center gap-2 mb-1">

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import type { NormalizedCandleData, MarketIndices, MarketRegimeContext, SyncProgress } from '../types/market';
@@ -31,7 +31,30 @@ export const useMarketStore = defineStore('market', () => {
     const lastScanTime = ref<number>(0);
     const logs = ref<string[]>([]);
     const syncProgress = ref<SyncProgress | null>(null);
+    const hasRegimeData = ref(false);
+    const hasBreadthData = ref(false);
+    const btcLiveTimeframes = ref<Record<string, boolean>>({});
     let isInitialized = false;
+
+    const hasAnyBtcData = computed(() => Object.keys(btcData.value).length > 0);
+    const hasRiskData = computed(() => Boolean(
+        btcData.value['15m']?.microstructure || btcData.value['4h']?.microstructure || btcData.value['1d']?.microstructure
+    ));
+    const requiredRegimeTimeframes = computed(() => {
+        const preferred = ['1d', '4h', '15m'];
+        const configured = timeframes.value.length > 0 ? timeframes.value : preferred;
+        return preferred.filter((tf) => configured.includes(tf));
+    });
+    const missingRegimeTimeframes = computed(() =>
+        requiredRegimeTimeframes.value.filter((tf) => !btcLiveTimeframes.value[tf])
+    );
+    const isRegimeLoading = computed(() =>
+        !hasRegimeData.value || missingRegimeTimeframes.value.length > 0
+    );
+    const isScannerLoading = computed(() => {
+        if (isRegimeLoading.value) return true;
+        return regime.value.allow_alt_scan && lastScanTime.value === 0;
+    });
 
     async function init() {
         if (isInitialized) return;
@@ -62,6 +85,7 @@ export const useMarketStore = defineStore('market', () => {
 
             if (eventType === 'RegimeUpdated') {
                 regime.value = event.payload.payload as MarketRegimeContext;
+                hasRegimeData.value = true;
                 // [TỰ BẢO VỆ] Nếu Phase 1 báo đèn đỏ, xóa ngay danh sách quét cũ
                 if (!regime.value.allow_alt_scan) {
                     shortlist.value = [];
@@ -79,7 +103,11 @@ export const useMarketStore = defineStore('market', () => {
 
             if (data.candle.symbol.toUpperCase() === 'BTCUSDT') {
                 btcData.value[data.candle.timeframe] = data;
+                if (eventType === 'CandleUpdated') {
+                    btcLiveTimeframes.value[data.candle.timeframe] = true;
+                }
                 marketIndices.value = data.market_indices;
+                hasBreadthData.value = true;
             }
 
             if (eventType === 'CandleClosed') {
@@ -91,5 +119,22 @@ export const useMarketStore = defineStore('market', () => {
         });
     }
 
-    return { btcData, timeframes, marketIndices, regime, shortlist, lastScanTime, logs, syncProgress, init };
+    return {
+        btcData,
+        timeframes,
+        marketIndices,
+        regime,
+        shortlist,
+        lastScanTime,
+        logs,
+        syncProgress,
+        hasRegimeData,
+        hasBreadthData,
+        hasAnyBtcData,
+        hasRiskData,
+        missingRegimeTimeframes,
+        isRegimeLoading,
+        isScannerLoading,
+        init
+    };
 });

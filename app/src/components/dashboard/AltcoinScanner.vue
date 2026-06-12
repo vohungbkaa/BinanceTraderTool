@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { Search, TrendingUp, TrendingDown, Info, ListFilter } from '@lucide/vue';
+import { Search, TrendingUp, TrendingDown, Info, ListFilter, Loader2 } from '@lucide/vue';
 import type { ScanCandidate } from '../../types/scanner';
 import { formatNum } from '../../composables/useFormat';
 
 defineProps<{
   shortlist: ScanCandidate[];
   lastScanTime: number;
+  isLoading?: boolean;
 }>();
 
 const getRatingClass = (rating: string) => {
@@ -35,7 +36,11 @@ const formatTime = (ts: number) => {
         <h2 class="text-sm font-bold uppercase tracking-wider text-gray-300">Altcoin Scanner Shortlist</h2>
       </div>
       <div class="flex items-center gap-3">
-        <span class="text-[10px] text-gray-500 font-medium italic">Last scan: {{ formatTime(lastScanTime) }}</span>
+        <span v-if="isLoading" class="flex items-center gap-1 text-[10px] text-yellow-500 font-bold uppercase">
+          <Loader2 class="w-3 h-3 animate-spin" />
+          Waiting for scan
+        </span>
+        <span v-else class="text-[10px] text-gray-500 font-medium italic">Last scan: {{ formatTime(lastScanTime) }}</span>
         <ListFilter class="w-4 h-4 text-gray-600" />
       </div>
     </div>
@@ -96,7 +101,17 @@ const formatTime = (ts: number) => {
           </tr>
           
           <!-- Empty State -->
-          <tr v-if="shortlist.length === 0">
+          <tr v-if="isLoading">
+            <td colspan="8" class="py-20 text-center">
+              <div class="flex flex-col items-center gap-3 text-yellow-500/80">
+                <Loader2 class="w-10 h-10 animate-spin" />
+                <p class="text-sm font-bold uppercase tracking-widest">Waiting for scanner context</p>
+                <p class="text-[10px] text-gray-500">Scanner will run after Market Regime allows altcoin scanning.</p>
+              </div>
+            </td>
+          </tr>
+
+          <tr v-else-if="shortlist.length === 0">
             <td colspan="8" class="py-20 text-center">
               <div class="flex flex-col items-center gap-3 opacity-20">
                 <Search class="w-12 h-12" />

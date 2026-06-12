@@ -83,6 +83,7 @@ impl BinanceWsClient {
                     );
 
                     let mut req_id = 1;
+                    let mut subscribed_streams = HashSet::new();
                     for chunk in all_streams.chunks(200) {
                         let subscribe_msg = serde_json::json!({
                             "method": "SUBSCRIBE",
@@ -96,12 +97,14 @@ impl BinanceWsClient {
                         {
                             tracing::error!("[WS] Failed to send SUBSCRIBE payload: {}", e);
                         }
+                        subscribed_streams.extend(chunk.iter().cloned());
                         req_id += 1;
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
 
                     // 1. Giới hạn 24 giờ của Binance
                     let connection_time = chrono::Utc::now();
+                    let mut resubscribe_interval = tokio::time::interval(Duration::from_secs(15));
 
                     loop {
                         // Restart kết nối trước khi chạm ngưỡng 24h (ở đây an toàn lấy 23.5h)
@@ -114,31 +117,59 @@ impl BinanceWsClient {
                             break;
                         }
 
-                        match tokio::time::timeout(Duration::from_secs(60), read.next()).await {
-                            Ok(Some(Ok(Message::Text(text)))) => {
-                                self.handle_message(text.as_str()).await;
-                            }
-                            Ok(Some(Ok(Message::Ping(ping_data)))) => {
-                                tracing::debug!(
-                                    "[WS] Received Ping from Binance, sending explicit Pong."
-                                );
-                                if let Err(e) = write.send(Message::Pong(ping_data)).await {
-                                    tracing::error!("[WS] Failed to send Pong: {}", e);
+                        tokio::select! {
+                            maybe_msg = read.next() => {
+                                match maybe_msg {
+                                    Some(Ok(Message::Text(text))) => {
+                                        self.handle_message(text.as_str()).await;
+                                    }
+                                    Some(Ok(Message::Ping(ping_data))) => {
+                                        tracing::debug!(
+                                            "[WS] Received Ping from Binance, sending explicit Pong."
+                                        );
+                                        if let Err(e) = write.send(Message::Pong(ping_data)).await {
+                                            tracing::error!("[WS] Failed to send Pong: {}", e);
+                                        }
+                                    }
+                                    Some(Err(e)) => {
+                                        tracing::error!("[WS] Read error: {}", e);
+                                        break;
+                                    }
+                                    None => {
+                                        tracing::warn!("[WS] Stream closed by server.");
+                                        break;
+                                    }
+                                    _ => {}
                                 }
                             }
-                            Ok(Some(Err(e))) => {
-                                tracing::error!("[WS] Read error: {}", e);
-                                break;
+                            _ = resubscribe_interval.tick() => {
+                                let all_streams = self.get_all_streams().await;
+                                let new_streams: Vec<String> = all_streams
+                                    .into_iter()
+                                    .filter(|stream| subscribed_streams.insert(stream.clone()))
+                                    .collect();
+
+                                if !new_streams.is_empty() {
+                                    tracing::info!("[WS] Subscribing {} newly discovered streams...", new_streams.len());
+                                    for chunk in new_streams.chunks(200) {
+                                        let subscribe_msg = serde_json::json!({
+                                            "method": "SUBSCRIBE",
+                                            "params": chunk,
+                                            "id": req_id
+                                        });
+
+                                        if let Err(e) = write
+                                            .send(Message::Text(subscribe_msg.to_string().into()))
+                                            .await
+                                        {
+                                            tracing::error!("[WS] Failed to send dynamic SUBSCRIBE payload: {}", e);
+                                            break;
+                                        }
+                                        req_id += 1;
+                                        tokio::time::sleep(Duration::from_millis(500)).await;
+                                    }
+                                }
                             }
-                            Ok(None) => {
-                                tracing::warn!("[WS] Stream closed by server.");
-                                break;
-                            }
-                            Err(_) => {
-                                tracing::warn!("[WS] Connection timed out (No data for 60s).");
-                                break;
-                            }
-                            _ => {}
                         }
                     }
                 }
