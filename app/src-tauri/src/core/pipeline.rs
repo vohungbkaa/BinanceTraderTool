@@ -25,7 +25,10 @@ pub struct DataPipeline {
     market_event_rx: mpsc::Receiver<MarketEvent>,
     system_event_rx: mpsc::Receiver<SystemEvent>,
     ws_client: Arc<BinanceWsClient>,
+    /// Live market client: scan, real-time REST calls. Budget cao (65%).
     rest_client: BinanceRestClient,
+    /// Bootstrap client: warmup, metadata, breadth. Budget thấp (40%) để nhường live.
+    rest_client_bootstrap: BinanceRestClient,
     db: Arc<Database>,
     global_event_tx: broadcast::Sender<MarketEvent>,
     indicator_engine: Arc<Mutex<IndicatorEngine>>,
@@ -49,7 +52,13 @@ impl DataPipeline {
         let (market_tx, market_rx) = mpsc::channel(1000);
         let (system_tx, system_rx) = mpsc::channel(100);
 
+        // Hai rate-limit budget tách biệt:
+        // - live: scan + real-time REST (65% budget, concurrency 8)
+        // - bootstrap: warmup + metadata + breadth (40% budget, concurrency 4)
+        // Đảm bảo bootstrap không bao giờ chèn live market events.
         let rest_client = BinanceRestClient::new();
+        let rest_client_bootstrap = BinanceRestClient::new_bootstrap();
+
         let ws_client = BinanceWsClient::new(market_tx, system_tx);
         let indicator_engine = Arc::new(Mutex::new(IndicatorEngine::new()));
 
@@ -58,16 +67,20 @@ impl DataPipeline {
             system_event_rx: system_rx,
             ws_client: Arc::new(ws_client),
             rest_client: rest_client.clone(),
+            rest_client_bootstrap: rest_client_bootstrap.clone(),
             db: db.clone(),
             global_event_tx,
             indicator_engine: indicator_engine.clone(),
             risk_manager: Arc::new(Mutex::new(RiskManager::new())),
-            metadata_manager: Arc::new(MetadataManager::new(rest_client.clone())),
+            // MetadataManager dùng bootstrap client — fetch nặng, không time-critical.
+            metadata_manager: Arc::new(MetadataManager::new(rest_client_bootstrap.clone())),
+            // BreadthEngine dùng bootstrap client — tính breadth là batch job 1h/lần.
             breadth_engine: Arc::new(BreadthEngine::new(
-                rest_client.clone(),
+                rest_client_bootstrap.clone(),
                 db.clone(),
                 app_handle.clone(),
             )),
+            // ScannerEngine dùng live client — cần latency thấp khi scan.
             scanner_engine: ScannerEngine::new(rest_client, indicator_engine),
             symbols,
             app_handle,
@@ -105,7 +118,9 @@ impl DataPipeline {
             }
         });
 
-        // 3. Worker Market Universe: Cập nhật Top 100 và Market Breadth định kỳ (1h/lần).
+        // 3. Worker Market Universe: Cập nhật universe và Market Breadth định kỳ (30min/lần).
+        // Lần đầu chạy sau 5 phút (không sleep 1h trước như cũ) để đảm bảo universe fresh
+        // nếu background bootstrap đã dùng cache cũ mà bỏ qua REST refresh.
         let breadth_engine_clone = Arc::clone(&self.breadth_engine);
         let metadata_manager_clone = Arc::clone(&self.metadata_manager);
         let db_clone_sync = Arc::clone(&self.db);
@@ -113,9 +128,10 @@ impl DataPipeline {
         let app_handle_clone = self.app_handle.clone();
 
         tokio::spawn(async move {
+            // Delay ngắn lần đầu để system ổn định trước khi refresh
+            tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-                info!("Scheduled sync: Updating Top 100 Symbols and Market Breadth...");
+                info!("Scheduled sync: Updating Universe and Market Breadth (30min interval)...");
                 if let Ok(candidates) = metadata_manager_clone.get_top_altcoins(None).await {
                     let _ = app_handle_clone.emit(
                         "market-event",
@@ -124,11 +140,11 @@ impl DataPipeline {
                     if let Err(e) = db_clone_sync.save_universe_candidates(&candidates).await {
                         warn!("Failed to save universe candidates: {}", e);
                     }
-                    let top_100: Vec<String> = candidates.into_iter().map(|c| c.symbol).collect();
+                    let top_universe: Vec<String> =
+                        candidates.into_iter().map(|c| c.symbol).collect();
 
-                    // Tính toán Breadth không giữ Mutex ngoài
                     if let Ok((ema50, ema200)) =
-                        breadth_engine_clone.calculate_breadth(&top_100).await
+                        breadth_engine_clone.calculate_breadth(&top_universe).await
                     {
                         breadth_engine_clone.apply_results(ema50, ema200).await;
 
@@ -143,6 +159,8 @@ impl DataPipeline {
                         };
                     }
                 }
+                // 30min thay vì 1h — crypto market thay đổi nhanh
+                tokio::time::sleep(tokio::time::Duration::from_secs(1800)).await;
             }
         });
 
@@ -154,10 +172,13 @@ impl DataPipeline {
             }
         });
 
-        // 5. Prime nhanh BTC từ cache để Phase 1/UI có context trước khi background warmup hoàn tất.
-        self.prime_cached_btc_context().await;
-
-        self.spawn_background_bootstrap();
+        // 5. Prime BTC context (từ DB cache) và background bootstrap chạy SONG SONG.
+        // prime_cached_btc_context() chỉ là DB I/O (~50-100ms) — không cần chờ trước bootstrap.
+        // Background bootstrap cần bắt đầu sớm nhất có thể để warmup indicators.
+        tokio::join!(
+            self.prime_cached_btc_context(),
+            std::future::ready(self.spawn_background_bootstrap())
+        );
 
         // 6. Vòng lặp điều phối chính: Phân phối sự kiện và kích hoạt Scanner.
         let mut regime_rx = self.global_event_tx.subscribe();
@@ -354,7 +375,8 @@ impl DataPipeline {
         let breadth_engine = Arc::clone(&self.breadth_engine);
         let db = Arc::clone(&self.db);
         let risk_manager = Arc::clone(&self.risk_manager);
-        let rest_client = self.rest_client.clone();
+        // Bootstrap dùng rest_client_bootstrap (budget thấp) để không chiếm bandwidth live.
+        let rest_client = self.rest_client_bootstrap.clone();
         let ws_client = Arc::clone(&self.ws_client);
         let indicator_engine = Arc::clone(&self.indicator_engine);
         let app_handle = self.app_handle.clone();
@@ -695,16 +717,81 @@ impl DataPipeline {
         progress_handle: Option<AppHandle>,
     ) -> Result<()> {
         let timeframes = crate::core::config::AppConfig::load().timeframes;
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(20));
-        let mut join_handles = Vec::new();
+        // Concurrency 8 — phù hợp với rate_limiter bootstrap (max_concurrency=4 thực tế do rate limiter).
+        // Outer semaphore 8 giới hạn số task trong queue, rate limiter kiểm soát actual HTTP calls.
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
         let total_steps = timeframes.len() * symbols.len();
         if total_steps == 0 {
             return Ok(());
         }
         let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
+        // BTC-first: warmup BTC đồng bộ trước tất cả altcoins.
+        // Regime engine cần BTC 1D/4H indicators để phát context — không để BTC tranh queue với 100 alts.
+        let (btc_symbols, alt_symbols): (Vec<String>, Vec<String>) =
+            symbols.into_iter().partition(|s| s == "BTCUSDT");
+
+        for tf in &timeframes {
+            for symbol in &btc_symbols {
+                let last = db.get_last_update_time(symbol, tf).await.unwrap_or(0);
+                let interval = timeframe_to_ms(tf);
+                if (chrono::Utc::now().timestamp_millis() - last) > interval {
+                    let limit = if last == 0 {
+                        200
+                    } else {
+                        (((chrono::Utc::now().timestamp_millis() - last) / interval) as u32)
+                            .min(200)
+                            + 2
+                    };
+                    if let Ok(klines) = rest_client.fetch_klines(symbol, tf, limit).await {
+                        let rows = {
+                            let mut engine = indicator_engine.lock().await;
+                            klines
+                                .into_iter()
+                                .map(|k| {
+                                    let inds = engine.process(&k);
+                                    NormalizedCandleData {
+                                        candle: k,
+                                        indicators: inds,
+                                        metadata: crate::core::models::CandleMetadata {
+                                            is_warmup: true,
+                                            ..Default::default()
+                                        },
+                                        ..Default::default()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        if let Err(e) = db.insert_closed_candles_bulk(&rows).await {
+                            warn!("Failed to bulk insert BTC warmup candles {} {}: {}", symbol, tf, e);
+                        }
+                    }
+                } else {
+                    let candles = db.get_candles(symbol, tf, 200).await.unwrap_or_default();
+                    let mut engine = indicator_engine.lock().await;
+                    for k in candles {
+                        let _ = engine.process(&k);
+                    }
+                }
+                let done = completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if let Some(handle) = &progress_handle {
+                    let prog = 70.0 + (done as f64 / total_steps as f64) * 30.0;
+                    let _ = handle.emit(
+                        "market-event",
+                        &MarketEvent::SyncProgress {
+                            step: "WARMUP".to_string(),
+                            progress: prog,
+                            message: format!("Warmup BTC {}: {}/{}", tf, done, total_steps),
+                        },
+                    );
+                }
+            }
+        }
+
+        // Altcoins: concurrent với semaphore, dùng bootstrap budget
+        let mut join_handles = Vec::new();
         for tf in timeframes {
-            for symbol in &symbols {
+            for symbol in &alt_symbols {
                 let (s, t, d, r, i, c, h) = (
                     symbol.clone(),
                     tf.clone(),

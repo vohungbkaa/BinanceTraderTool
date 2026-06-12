@@ -82,7 +82,9 @@ impl MetadataManager {
         };
 
         // Constants for Scoring Logic
-        const INITIAL_UNIVERSE_LIMIT: usize = 300;
+        // 200 → 150: sau khi đã filter $50M volume floor, universe thực tế ~150-180 symbols.
+        // Giảm từ 300 xuống 200 → tiết kiệm ~100 OI requests + ~100 OI_HIST = ~200 weight.
+        const INITIAL_UNIVERSE_LIMIT: usize = 200;
         const OI_FILTER_LIMIT: usize = 150;
         // Ngưỡng thanh khoản tối thiểu — loại coin illiquid trước khi scoring.
         // Trader chuyên nghiệp không trade coin dưới $50M volume hay $20M OI vì slippage cao.

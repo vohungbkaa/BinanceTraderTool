@@ -15,11 +15,24 @@ pub struct BinanceRestClient {
 }
 
 impl BinanceRestClient {
+    /// Client cho live market data (scan, real-time).
+    /// Budget cao (65% / 2400wpm), concurrency 8.
     pub fn new() -> Self {
         Self {
             client: Client::new(),
             base_url: "https://fapi.binance.com".to_string(),
             rate_limiter: Arc::new(BinanceRateLimiter::default()),
+        }
+    }
+
+    /// Client cho heavy bootstrap operations (warmup, metadata, breadth).
+    /// Budget thấp (40% / 2400wpm = 960wpm), concurrency 4 để nhường bandwidth cho live.
+    /// Dùng riêng biệt để tránh bootstrap lấn át live market events.
+    pub fn new_bootstrap() -> Self {
+        Self {
+            client: Client::new(),
+            base_url: "https://fapi.binance.com".to_string(),
+            rate_limiter: Arc::new(BinanceRateLimiter::new(2400, 0.40, 4)),
         }
     }
 

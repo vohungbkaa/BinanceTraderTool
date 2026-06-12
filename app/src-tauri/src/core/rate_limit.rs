@@ -59,8 +59,17 @@ impl BinanceRateLimiter {
                     state.used_weight = 0;
                     None
                 } else if state.used_weight.saturating_add(weight) > self.safety_weight_per_minute {
-                    let duration =
+                    let window_remaining =
                         Duration::from_secs(60) - now.duration_since(state.window_started_at);
+                    // Jitter 0-200ms: trải đều burst sau khi window reset.
+                    // Dùng subsec_nanos() làm pseudo-random seed — không cần crate rand,
+                    // mỗi task gọi acquire() ở nanosecond khác nhau nên jitter khác nhau.
+                    let jitter_ms = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .subsec_nanos()
+                        % 200) as u64;
+                    let duration = window_remaining + Duration::from_millis(jitter_ms);
                     let should_warn = state
                         .last_pause_log_until
                         .map(|until| until <= now)
@@ -74,7 +83,7 @@ impl BinanceRateLimiter {
                             sleep_ms = duration.as_millis(),
                             "Binance REST limiter pausing request queue"
                         );
-                        state.last_pause_log_until = Some(now + duration);
+                        state.last_pause_log_until = Some(now + window_remaining);
                     } else {
                         debug!(
                             endpoint,
