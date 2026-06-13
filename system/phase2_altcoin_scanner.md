@@ -6,11 +6,16 @@ Là Agent thực thi Phase 2, nhiệm vụ của bạn là tiếp nhận `Contex
 *Lưu ý cốt lõi:* Bạn CHỈ ĐƯỢC PHÉP hoạt động khi nhận được trạng thái `allow_alt_scan = true` từ Phase 1. Nếu Phase 1 gửi tín hiệu ngắt, bạn phải dừng toàn bộ tiến trình quét.
 
 ## 2. BỘ LỌC TƯ CÁCH (ELIGIBILITY FILTER)
-Trước khi tính toán sức mạnh, bạn phải loại bỏ ngay các Altcoin không đủ tiêu chuẩn thanh khoản để bảo vệ hệ thống khỏi trượt giá (Slippage) và nguy cơ thao túng (Manipulation):
-- **Khối lượng giao dịch (Volume 24h):** > 50M USDT (Tính trung bình 3 ngày gần nhất).
-- **Hợp đồng mở (Open Interest - OI):** > 10M USDT.
-- **Thanh khoản Orderbook (Liquidity Score):** Spread < 0.05% và trượt giá cho một lệnh quy mô chuẩn (VD: $50,000) không vượt quá 0.1%.
-- **Thời gian niêm yết (Listing Age):** > 30 ngày (Loại bỏ các token mới lên sàn có biến động quá nhiễu).
+Trước khi tính toán sức mạnh, bạn phải loại bỏ ngay các Altcoin không đủ tiêu chuẩn thanh khoản để bảo vệ hệ thống khỏi trượt giá (Slippage), thao túng (Manipulation) và rủi ro forced liquidation khi đánh futures.
+
+Phase 2 chỉ được nhận universe đã qua hard gate từ Phase 0. Nếu Phase 0 chưa có dữ liệu `spread_pct`, `depth_50k_slippage_pct`, `listing_age_days` hoặc `open_interest`, symbol đó phải bị xem là **không đủ điều kiện trade**, không được đưa vào shortlist chỉ vì RS mạnh.
+
+Hard gate chuẩn:
+- **Khối lượng giao dịch (Volume 24h):** >= 50M USDT.
+- **Hợp đồng mở danh nghĩa (Open Interest - OI):** >= 20M USDT.
+- **Thanh khoản Orderbook:** Spread <= 0.05% và estimated slippage cho lệnh market 50,000 USDT <= 0.10%.
+- **Thời gian niêm yết (Listing Age):** >= 30 ngày.
+- **Funding sanity:** Loại các symbol nằm ở đuôi funding quá lệch so với universe, trừ khi chiến thuật đang chủ động đánh squeeze/mean-reversion và Phase 1 cho phép.
 
 ## 3. THUẬT TOÁN TÍNH RELATIVE STRENGTH (NORMALIZED RS SCORE)
 Để so sánh công bằng giữa một coin có hệ số biến động lớn (như MEME coin) và một coin vốn hoá lớn, bạn PHẢI dùng Z-Score để chuẩn hoá (Normalize) RS. Không dùng % chênh lệch đơn thuần.
@@ -42,10 +47,15 @@ Trước khi tính toán sức mạnh, bạn phải loại bỏ ngay các Altcoi
 Các Altcoin lọt qua vòng Screening ở Mục 4 sẽ được chấm điểm để chọn ra Top 3 - Top 5 coin "tinh nhuệ" nhất chuyển giao cho Phase 3.
 
 **Công thức Xếp hạng (Ranking Score):**
-`Rank_Score = (Final_RS * 0.4) + (Volume_Growth_Score * 0.3) + (OI_Growth_Score * 0.3)`
+`Rank_Score_LONG = (Final_RS * 0.35) + (Volume_Growth_Score * 0.20) + (OI_Growth_Score * 0.25) + (Liquidity_Score * 0.20)`
+
+`Rank_Score_SHORT = ((-Final_RS) * 0.35) + (Volume_Growth_Score * 0.20) + (OI_Growth_Score * 0.25) + (Liquidity_Score * 0.20)`
+
+Không được dùng cùng một dấu `Final_RS` cho cả long và short. Với short, coin càng laggard thì `Final_RS` càng âm và điểm phải càng cao sau khi đổi dấu.
 
 - **Volume Growth:** Mức độ đột biến Volume 4H so với trung bình 24H (Tính bằng Z-Score).
 - **OI Growth:** Mức độ đột biến Hợp đồng mở 4H so với trung bình 24H. (Lưu ý: Nếu OI giảm - Deleveraging, điểm score này sẽ bị trừ).
+- **Liquidity Score:** Điểm Phase 0 tính từ spread và estimated slippage. Không có liquidity score thì candidate không được đi tiếp.
 
 ## 6. CẤU TRÚC ĐẦU RA YÊU CẦU CHO PHASE 3 (JSON OUTPUT)
 Đầu ra của Agent Phase 2 phải là một danh sách các "Ứng viên" (Candidates) đã được xếp hạng, kèm theo Context hiện tại để Phase 3 biết áp dụng chiến thuật vào lệnh (Trigger) nào.

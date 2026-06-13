@@ -22,9 +22,16 @@ interface UniverseCandidate {
   oi_change_score: number;
   atr_score: number;
   fund_score: number;
+  liquidity_score: number;
+  flow_score: number;
+  age_score: number;
   composite_score: number;
   price_change_percent: number;
   last_price: number;
+  listing_age_days: number;
+  taker_buy_ratio_24h: number;
+  spread_pct: number;
+  depth_50k_slippage_pct: number;
 }
 
 interface NormalizedCandleData {
@@ -93,6 +100,11 @@ const filterTop100 = ref({
   oi_change: '',
   volatility: '',
   funding: '',
+  liquidity: '',
+  spread: '',
+  slippage: '',
+  age: '',
+  taker_buy: '',
   price: '',
   change: ''
 });
@@ -131,6 +143,11 @@ const filteredTopAltcoins = computed(() => {
     if (!numFilter(coin.oi_change_24h_pct, filterTop100.value.oi_change)) return false;
     if (!numFilter(coin.volatility, filterTop100.value.volatility)) return false;
     if (!numFilter(coin.funding_rate, filterTop100.value.funding)) return false;
+    if (!numFilter(coin.liquidity_score, filterTop100.value.liquidity)) return false;
+    if (!numFilter(coin.spread_pct, filterTop100.value.spread)) return false;
+    if (!numFilter(coin.depth_50k_slippage_pct, filterTop100.value.slippage)) return false;
+    if (!numFilter(coin.listing_age_days, filterTop100.value.age)) return false;
+    if (!numFilter(coin.taker_buy_ratio_24h * 100, filterTop100.value.taker_buy)) return false;
     if (!numFilter(coin.last_price, filterTop100.value.price)) return false;
     if (!numFilter(coin.price_change_percent, filterTop100.value.change)) return false;
     
@@ -302,6 +319,11 @@ onMounted(() => {
               <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-purple-400">OI Change</th>
               <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Volatility</th>
               <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Funding</th>
+              <th scope="col" class="w-[120px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Liquidity</th>
+              <th scope="col" class="w-[100px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Spread</th>
+              <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Slip 50k</th>
+              <th scope="col" class="w-[100px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Age</th>
+              <th scope="col" class="w-[110px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Taker Buy</th>
               <th scope="col" class="w-[120px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800">Last Price</th>
               <th scope="col" class="w-[100px] px-3 py-3 sticky top-0 z-40 bg-gray-900 border-b border-gray-800 text-right">24h Change</th>
             </tr>
@@ -316,6 +338,11 @@ onMounted(() => {
               <th class="px-1 py-1"><input v-model="filterTop100.oi_change" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">10"></th>
               <th class="px-1 py-1"><input v-model="filterTop100.volatility" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="<0.05"></th>
               <th class="px-1 py-1"><input v-model="filterTop100.funding" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="Filter"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.liquidity" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">80"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.spread" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="<0.05"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.slippage" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="<0.1"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.age" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">30"></th>
+              <th class="px-1 py-1"><input v-model="filterTop100.taker_buy" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">45"></th>
               <th class="px-1 py-1"><input v-model="filterTop100.price" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder="<1"></th>
               <th class="px-1 py-1"><input v-model="filterTop100.change" class="w-full bg-gray-900/50 border border-gray-700 text-gray-300 text-[10px] rounded px-1 py-1 outline-none" placeholder=">5"></th>
             </tr>
@@ -331,10 +358,15 @@ onMounted(() => {
               <td class="px-3 py-2 text-purple-300"><div :class="coin.oi_change_24h_pct >= 0 ? 'text-green-400' : 'text-red-400'">{{ coin.oi_change_24h_pct > 0 ? '+' : '' }}{{ coin.oi_change_24h_pct.toFixed(1) }}%</div><div class="text-[10px] text-gray-500 italic">Score: {{ coin.oi_change_score.toFixed(1) }}</div></td>
               <td class="px-3 py-2 text-indigo-400"><div>{{ (coin.volatility * 100).toFixed(2) }}%</div><div class="text-[10px] text-gray-500 italic">Score: {{ coin.atr_score.toFixed(1) }}</div></td>
               <td class="px-3 py-2 text-pink-400"><div>{{ formatPct(coin.funding_rate) }}</div><div class="text-[10px] text-gray-500 italic">Score: {{ coin.fund_score.toFixed(1) }}</div></td>
+              <td class="px-3 py-2 text-emerald-400"><div>{{ coin.liquidity_score.toFixed(1) }}</div><div class="text-[10px] text-gray-500 italic">Flow: {{ coin.flow_score.toFixed(1) }}</div></td>
+              <td class="px-3 py-2 text-gray-300 text-right">{{ coin.spread_pct.toFixed(3) }}%</td>
+              <td class="px-3 py-2 text-gray-300 text-right">{{ coin.depth_50k_slippage_pct.toFixed(3) }}%</td>
+              <td class="px-3 py-2 text-gray-300 text-right">{{ coin.listing_age_days.toFixed(0) }}d</td>
+              <td class="px-3 py-2 text-gray-300 text-right">{{ (coin.taker_buy_ratio_24h * 100).toFixed(1) }}%</td>
               <td class="px-3 py-2 text-gray-300 text-right">{{ formatNumber(coin.last_price) }}</td>
               <td :class="['px-3 py-2 font-medium text-right', coin.price_change_percent >= 0 ? 'text-green-500' : 'text-red-500']">{{ coin.price_change_percent > 0 ? '+' : '' }}{{ coin.price_change_percent.toFixed(2) }}%</td>
             </tr>
-            <tr v-if="filteredTopAltcoins.length === 0 && !isLoadingTop100"><td colspan="11" class="px-6 py-8 text-center text-gray-500">No data available.</td></tr>
+            <tr v-if="filteredTopAltcoins.length === 0 && !isLoadingTop100"><td colspan="16" class="px-6 py-8 text-center text-gray-500">No data available.</td></tr>
           </tbody>
         </table>
       </div>

@@ -91,14 +91,54 @@ impl Database {
                 oi_change_score REAL NOT NULL,
                 atr_score REAL NOT NULL,
                 fund_score REAL NOT NULL,
+                liquidity_score REAL NOT NULL DEFAULT 0,
+                flow_score REAL NOT NULL DEFAULT 0,
+                age_score REAL NOT NULL DEFAULT 0,
                 composite_score REAL NOT NULL,
                 price_change_percent REAL NOT NULL,
                 last_price REAL NOT NULL,
+                listing_age_days REAL NOT NULL DEFAULT 0,
+                taker_buy_ratio_24h REAL NOT NULL DEFAULT 0.5,
+                spread_pct REAL NOT NULL DEFAULT 0,
+                depth_50k_slippage_pct REAL NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL
             );",
         )
         .execute(&self.pool)
         .await?;
+        let _ = sqlx::query(
+            "ALTER TABLE universe_candidates ADD COLUMN liquidity_score REAL NOT NULL DEFAULT 0;",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
+            "ALTER TABLE universe_candidates ADD COLUMN flow_score REAL NOT NULL DEFAULT 0;",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
+            "ALTER TABLE universe_candidates ADD COLUMN age_score REAL NOT NULL DEFAULT 0;",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
+            "ALTER TABLE universe_candidates ADD COLUMN listing_age_days REAL NOT NULL DEFAULT 0;",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ =
+            sqlx::query("ALTER TABLE universe_candidates ADD COLUMN taker_buy_ratio_24h REAL NOT NULL DEFAULT 0.5;")
+                .execute(&self.pool)
+                .await;
+        let _ = sqlx::query(
+            "ALTER TABLE universe_candidates ADD COLUMN spread_pct REAL NOT NULL DEFAULT 0;",
+        )
+        .execute(&self.pool)
+        .await;
+        let _ =
+            sqlx::query("ALTER TABLE universe_candidates ADD COLUMN depth_50k_slippage_pct REAL NOT NULL DEFAULT 0;")
+                .execute(&self.pool)
+                .await;
 
         Ok(())
     }
@@ -121,9 +161,10 @@ impl Database {
                 INSERT INTO universe_candidates (
                     symbol, quote_volume, volume_change_24h_pct, open_interest, oi_change_24h_pct,
                     volatility, funding_rate, vol_score, vol_change_score, oi_score,
-                    oi_change_score, atr_score, fund_score, composite_score,
-                    price_change_percent, last_price, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                    oi_change_score, atr_score, fund_score, liquidity_score, flow_score, age_score,
+                    composite_score, price_change_percent, last_price, listing_age_days,
+                    taker_buy_ratio_24h, spread_pct, depth_50k_slippage_pct, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
                 "#
             )
             .bind(&c.symbol)
@@ -139,9 +180,16 @@ impl Database {
             .bind(c.oi_change_score)
             .bind(c.atr_score)
             .bind(c.fund_score)
+            .bind(c.liquidity_score)
+            .bind(c.flow_score)
+            .bind(c.age_score)
             .bind(c.composite_score)
             .bind(c.price_change_percent)
             .bind(c.last_price)
+            .bind(c.listing_age_days)
+            .bind(c.taker_buy_ratio_24h)
+            .bind(c.spread_pct)
+            .bind(c.depth_50k_slippage_pct)
             .bind(now)
             .execute(&self.pool)
             .await?;
@@ -156,8 +204,9 @@ impl Database {
         let rows = sqlx::query(
             "SELECT symbol, quote_volume, volume_change_24h_pct, open_interest, oi_change_24h_pct,
                     volatility, funding_rate, vol_score, vol_change_score, oi_score,
-                    oi_change_score, atr_score, fund_score, composite_score,
-                    price_change_percent, last_price 
+                    oi_change_score, atr_score, fund_score, liquidity_score, flow_score, age_score,
+                    composite_score, price_change_percent, last_price, listing_age_days,
+                    taker_buy_ratio_24h, spread_pct, depth_50k_slippage_pct
              FROM universe_candidates 
              ORDER BY composite_score DESC",
         )
@@ -180,9 +229,16 @@ impl Database {
                 oi_change_score: r.get(10),
                 atr_score: r.get(11),
                 fund_score: r.get(12),
-                composite_score: r.get(13),
-                price_change_percent: r.get(14),
-                last_price: r.get(15),
+                liquidity_score: r.get(13),
+                flow_score: r.get(14),
+                age_score: r.get(15),
+                composite_score: r.get(16),
+                price_change_percent: r.get(17),
+                last_price: r.get(18),
+                listing_age_days: r.get(19),
+                taker_buy_ratio_24h: r.get(20),
+                spread_pct: r.get(21),
+                depth_50k_slippage_pct: r.get(22),
             })
             .collect();
 

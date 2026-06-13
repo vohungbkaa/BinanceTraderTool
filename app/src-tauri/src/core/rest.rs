@@ -7,6 +7,12 @@ use serde_json::Value;
 use std::sync::Arc;
 use tracing::info;
 
+#[derive(Debug, Clone, Default)]
+pub struct OrderBookLiquidity {
+    pub spread_pct: f64,
+    pub depth_50k_slippage_pct: f64,
+}
+
 #[derive(Clone)]
 pub struct BinanceRestClient {
     client: Client,
@@ -138,6 +144,146 @@ impl BinanceRestClient {
     pub async fn fetch_open_interest(&self, symbol: &str) -> Result<Value> {
         let url = format!("{}/fapi/v1/openInterest?symbol={}", self.base_url, symbol);
         self.get_json("openInterest", url, 1).await
+    }
+
+    /// Đo thanh khoản thực dụng từ orderbook: spread và slippage ước tính cho lệnh market 50k USDT.
+    pub async fn fetch_order_book_liquidity(
+        &self,
+        symbol: &str,
+        notional_usdt: f64,
+    ) -> Result<OrderBookLiquidity> {
+        let url = format!(
+            "{}/fapi/v1/depth?symbol={}&limit=100",
+            self.base_url, symbol
+        );
+        let data: Value = self.get_json("depth", url, 5).await?;
+        let bids = data["bids"].as_array().context("Missing bids")?;
+        let asks = data["asks"].as_array().context("Missing asks")?;
+
+        let best_bid = bids
+            .first()
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let best_ask = asks
+            .first()
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+
+        if best_bid <= 0.0 || best_ask <= 0.0 {
+            bail!("Invalid top of book for {}", symbol);
+        }
+
+        let mid = (best_bid + best_ask) / 2.0;
+        let spread_pct = (best_ask - best_bid) / mid * 100.0;
+        let buy_slippage = Self::simulate_market_slippage(asks, notional_usdt, mid);
+        let sell_slippage = Self::simulate_market_slippage(bids, notional_usdt, mid);
+
+        Ok(OrderBookLiquidity {
+            spread_pct,
+            depth_50k_slippage_pct: buy_slippage.max(sell_slippage),
+        })
+    }
+
+    fn simulate_market_slippage(levels: &[Value], notional_usdt: f64, mid: f64) -> f64 {
+        if mid <= 0.0 || notional_usdt <= 0.0 {
+            return f64::INFINITY;
+        }
+
+        let mut remaining = notional_usdt;
+        let mut filled_qty = 0.0;
+        let mut spent = 0.0;
+
+        for level in levels {
+            let price = level
+                .get(0)
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let qty = level
+                .get(1)
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            if price <= 0.0 || qty <= 0.0 {
+                continue;
+            }
+
+            let level_notional = price * qty;
+            let fill_notional = remaining.min(level_notional);
+            let fill_qty = fill_notional / price;
+            filled_qty += fill_qty;
+            spent += fill_notional;
+            remaining -= fill_notional;
+
+            if remaining <= 0.0 {
+                break;
+            }
+        }
+
+        if remaining > 0.0 || filled_qty <= 0.0 {
+            return f64::INFINITY;
+        }
+
+        let avg_price = spent / filled_qty;
+        ((avg_price - mid).abs() / mid) * 100.0
+    }
+
+    pub async fn fetch_order_book_liquidity_bulk<F>(
+        &self,
+        symbols: &[String],
+        on_progress: F,
+    ) -> Result<std::collections::HashMap<String, OrderBookLiquidity>>
+    where
+        F: Fn(f64, String) + Send + Sync + 'static,
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let total = symbols.len().max(1);
+        let completed = Arc::new(AtomicUsize::new(0));
+        let on_progress = Arc::new(on_progress);
+        let semaphore = Arc::new(Semaphore::new(8));
+        let mut tasks = Vec::new();
+
+        for symbol in symbols {
+            let sym = symbol.clone();
+            let client = self.clone();
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let completed = completed.clone();
+            let on_progress = on_progress.clone();
+
+            tasks.push(tokio::spawn(async move {
+                let _permit = permit;
+                let result = match client.fetch_order_book_liquidity(&sym, 50_000.0).await {
+                    Ok(liquidity) => Some((sym.clone(), liquidity)),
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch orderbook liquidity for {}: {}", sym, e);
+                        None
+                    }
+                };
+
+                let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                on_progress(
+                    (done as f64 / total as f64) * 100.0,
+                    format!("Checking orderbook liquidity: {}/{}", done, total),
+                );
+                result
+            }));
+        }
+
+        let mut results = std::collections::HashMap::new();
+        for task in futures_util::future::join_all(tasks).await {
+            if let Ok(Some((sym, liquidity))) = task {
+                results.insert(sym, liquidity);
+            }
+        }
+
+        Ok(results)
     }
 
     /// Lấy Open Interest cho nhiều symbols đồng thời với giới hạn concurrency

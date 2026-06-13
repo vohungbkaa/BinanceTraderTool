@@ -406,8 +406,15 @@ impl DataPipeline {
                             .timestamp_millis()
                             .saturating_sub(updated_at)
                     });
+            let cache_has_tradeability_metrics = cached_candidates.iter().all(|c| {
+                c.listing_age_days >= 30.0
+                    && c.spread_pct > 0.0
+                    && c.depth_50k_slippage_pct > 0.0
+                    && c.liquidity_score > 0.0
+            });
 
             if !cached_candidates.is_empty()
+                && cache_has_tradeability_metrics
                 && cache_age_ms
                     .map(|age| age <= STARTUP_UNIVERSE_CACHE_TTL_MS)
                     .unwrap_or(false)
