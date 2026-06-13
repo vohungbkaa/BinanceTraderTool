@@ -60,10 +60,10 @@ export const useMarketStore = defineStore('market', () => {
         return regime.value.allow_alt_scan && lastScanTime.value === 0;
     });
 
-    watch([syncProgress, hasLiveFeed], ([progress, liveFeed]: [SyncProgress | null, boolean]) => {
-        if (progress?.step === 'WARMUP_DONE' || (progress && liveFeed)) {
+    watch([syncProgress], ([progress]: [SyncProgress | null]) => {
+        if (progress?.step === 'WARMUP_DONE') {
             setTimeout(() => {
-                if (syncProgress.value?.step === 'WARMUP_DONE' || hasLiveFeed.value) {
+                if (syncProgress.value?.step === 'WARMUP_DONE') {
                     syncProgress.value = null;
                 }
             }, 1500);
